@@ -39,6 +39,18 @@ final class VideoEncoder {
     private var lastFormatDescription: CMFormatDescription?
     private var forceKeyframeNext = false
     private var frameIndex: Int64 = 0
+    private var _framesInFlight = 0
+
+    /// Frames handed to VideoToolbox that have not come back yet.
+    ///
+    /// This is the backpressure signal that matters most. At a full 2880x1800 the hardware
+    /// encoder is the narrowest part of the pipeline, and submitting faster than it drains
+    /// simply grows a queue inside VideoToolbox — latency climbs without bound and never
+    /// recovers, because nothing downstream can see the backlog.
+    var framesInFlight: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _framesInFlight
+    }
 
     init(configuration: Configuration) {
         self.configuration = configuration
@@ -90,6 +102,8 @@ final class VideoEncoder {
             configuration.codec == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel
                                          : kVTProfileLevel_H264_High_AutoLevel)
         set(kVTCompressionPropertyKey_ExpectedFrameRate, configuration.fps as CFNumber)
+        // Never hold a frame back hoping for a better decision later.
+        set(kVTCompressionPropertyKey_MaxFrameDelayCount, 1 as CFNumber)
 
         // Long GOP. The receiver requests an IDR on connect and after any loss.
         set(kVTCompressionPropertyKey_MaxKeyFrameInterval, 600 as CFNumber)
@@ -124,6 +138,7 @@ final class VideoEncoder {
 
     func stop() {
         lock.lock(); defer { lock.unlock() }
+        _framesInFlight = 0
         guard let session else { return }
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
         VTCompressionSessionInvalidate(session)
@@ -170,6 +185,7 @@ final class VideoEncoder {
         forceKeyframeNext = false
         let index = frameIndex
         frameIndex += 1
+        _framesInFlight += 1
         lock.unlock()
 
         let pts = CMTime(value: index, timescale: CMTimeScale(configuration.fps))
@@ -185,7 +201,9 @@ final class VideoEncoder {
             duration: duration,
             frameProperties: properties,
             infoFlagsOut: nil) { [weak self] status, _, sampleBuffer in
-                guard let self, status == noErr, let sampleBuffer,
+                guard let self else { return }
+                self.lock.lock(); self._framesInFlight -= 1; self.lock.unlock()
+                guard status == noErr, let sampleBuffer,
                       CMSampleBufferDataIsReady(sampleBuffer) else { return }
                 self.handleEncoded(sampleBuffer, captureTimeMicros: captureTimeMicros)
             }

@@ -17,6 +17,7 @@ final class HostSession: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
+    /// Sampled from the pump on a timer rather than written per frame — see FramePump.
     @Published private(set) var stats = SessionStats()
     @Published private(set) var isHiDPI = true
     @Published private(set) var virtualDisplayName = ""
@@ -27,18 +28,21 @@ final class HostSession: ObservableObject {
     private var virtualDisplay: VirtualDisplayHost?
     private var capture: DisplayCapture?
     private var encoder: VideoEncoder?
-    private var injector: InputInjector?
+    private nonisolated(unsafe) var injector: InputInjector?
+    private var pump: FramePump? {
+        didSet { pumpForNetwork = pump }
+    }
+    /// Reachable from the network queue without hopping to the main actor.
+    private nonisolated(unsafe) var pumpForNetwork: FramePump?
+    private var statsTimer: Timer?
     private var latestParameterSets: VideoParameterSets?
     private let queue = DispatchQueue(label: "com.voxturr.mirage.host", qos: .userInteractive)
-
-    // Adaptive bitrate state
-    private var currentBitrateKbps: Int
-    private var lastBitrateChange = MonotonicClock.millis()
-    private var congestedStreak = 0
+    private let injectorQueue = DispatchQueue(label: "com.voxturr.mirage.input", qos: .userInteractive)
+    /// Read from the network queue, so it is kept as a plain flag rather than actor state.
+    private nonisolated(unsafe) var acceptsRemoteInput = false
 
     init(settings: HostSettings) {
         self.settings = settings
-        self.currentBitrateKbps = settings.targetBitrateKbps
     }
 
     // MARK: Connect
@@ -65,6 +69,21 @@ final class HostSession: ObservableObject {
             }
         }
         link.onMessage = { [weak self] type, flags, timestamp, payload in
+            // Input is replayed straight from the network queue: routing it through the main
+            // actor added a scheduling hop to every pointer move.
+            if type == .input {
+                guard let self, self.acceptsRemoteInput, let event = InputEvent(decoding: payload) else { return }
+                self.injectorQueue.async { self.injector?.handle(event) }
+                return
+            }
+            if type == .frameAck {
+                self?.pumpForNetwork?.acknowledgeFrame()
+                return
+            }
+            if type == .requestKeyframe {
+                self?.pumpForNetwork?.requestKeyframe()
+                return
+            }
             Task { @MainActor in self?.handle(type: type, flags: flags, timestamp: timestamp, payload: payload) }
         }
         link.start()
@@ -79,8 +98,9 @@ final class HostSession: ObservableObject {
     }
 
     private func teardownPipeline() {
-        injector?.releaseAll()
-        injector = nil
+        statsTimer?.invalidate(); statsTimer = nil
+        pump?.stop(); pump = nil
+        injectorQueue.sync { injector?.releaseAll(); injector = nil }
         encoder?.stop()
         encoder = nil
         if let capture { Task { await capture.stop() } }
@@ -98,21 +118,9 @@ final class HostSession: ObservableObject {
             guard let hello = try? JSONDecoder().decode(ClientHello.self, from: payload) else { return }
             startPipeline(for: hello)
 
-        case .requestKeyframe:
-            encoder?.requestKeyframe()
-
-        case .input:
-            guard settings.acceptRemoteInput, let event = InputEvent(decoding: payload) else { return }
-            injector?.handle(event)
-
         case .stats:
             guard let clientStats = try? JSONDecoder().decode(ClientStats.self, from: payload) else { return }
-            stats.roundTripMs = clientStats.averageLatencyMs
-            stats.decodeMs = clientStats.decodeMsAverage
-            stats.framesDroppedRemote = clientStats.framesDropped
-
-        case .ping:
-            link?.send(.pong, timestampMicros: timestamp)
+            pump?.recordRemote(droppedFrames: clientStats.framesDropped, decodeMs: clientStats.decodeMsAverage)
 
         case .bye:
             state = .idle
@@ -162,22 +170,19 @@ final class HostSession: ObservableObject {
 
         let codec = chooseCodec(hello)
         let fps = min(settings.maxFPS, hello.refreshHz)
-        currentBitrateKbps = settings.targetBitrateKbps
 
         let encoder = VideoEncoder(configuration: .init(codec: codec,
                                                         width: hello.pixelWidth,
                                                         height: hello.pixelHeight,
                                                         fps: fps,
-                                                        bitrateKbps: currentBitrateKbps,
+                                                        bitrateKbps: settings.targetBitrateKbps,
                                                         maxAllowedQP: settings.prioritiseTextClarity ? 34 : nil))
+        // Parameter sets arrive only on an IDR, so the main-actor hop is harmless here.
         encoder.onParameterSets = { [weak self] sets in
             Task { @MainActor in
                 self?.latestParameterSets = sets
                 self?.link?.sendJSON(.videoParams, sets)
             }
-        }
-        encoder.onEncodedFrame = { [weak self] frame in
-            Task { @MainActor in self?.send(frame) }
         }
 
         do {
@@ -188,17 +193,24 @@ final class HostSession: ObservableObject {
         }
         self.encoder = encoder
 
-        if settings.acceptRemoteInput && hello.wantsInputForwarding {
-            injector = InputInjector(displayBounds: display.bounds)
+        acceptsRemoteInput = settings.acceptRemoteInput && hello.wantsInputForwarding
+        if acceptsRemoteInput {
+            let bounds = display.bounds
+            injectorQueue.sync { self.injector = InputInjector(displayBounds: bounds) }
         }
+
+        guard let link else { reject("The link closed before the stream could start."); return }
+        let pump = FramePump(link: link, encoder: encoder, settings: settings)
+        self.pump = pump
 
         let capture = DisplayCapture(configuration: .init(displayID: display.displayID,
                                                           pixelWidth: hello.pixelWidth,
                                                           pixelHeight: hello.pixelHeight,
                                                           fps: fps,
                                                           showsCursor: true))
-        capture.onFrame = { [weak self] pixelBuffer, captureTime in
-            self?.encodeIfLinkCanKeepUp(pixelBuffer, captureTime: captureTime)
+        // Straight from the capture queue into the pump. No actor hop, no reordering.
+        capture.onFrame = { [pump] pixelBuffer, captureTime in
+            pump.submit(pixelBuffer: pixelBuffer, captureTimeMicros: captureTime)
         }
         capture.onStopped = { [weak self] (error: Error?) in
             Task { @MainActor in self?.state = .failed(error?.localizedDescription ?? "Screen capture stopped.") }
@@ -219,10 +231,11 @@ final class HostSession: ObservableObject {
                                        codec: codec,
                                        pixelWidth: hello.pixelWidth, pixelHeight: hello.pixelHeight,
                                        pointWidth: hello.pointWidth, pointHeight: hello.pointHeight,
-                                       fps: fps, bitrateKbps: self.currentBitrateKbps,
+                                       fps: fps, bitrateKbps: self.settings.targetBitrateKbps,
                                        isHiDPI: display.isHiDPI)
                 self.link?.sendJSON(.helloAck, ack)
-                self.encoder?.requestKeyframe()
+                self.pump?.requestKeyframe()
+                self.startStatsSampling()
             }
         }
     }
@@ -244,72 +257,20 @@ final class HostSession: ObservableObject {
         teardownPipeline()
     }
 
-    // MARK: Flow control
+    // MARK: UI sampling
 
-    /// Backpressure. If the socket has not drained the previous frames there is no point
-    /// encoding another one — it would only add queueing delay. Dropping here keeps the
-    /// picture current rather than letting it fall behind and stay behind.
-    private nonisolated func encodeIfLinkCanKeepUp(_ pixelBuffer: CVPixelBuffer, captureTime: UInt64) {
-        Task { @MainActor in
-            guard let link = self.link, let encoder = self.encoder else { return }
-            let budget = max(64 * 1024, self.currentBitrateKbps * 1000 / 8 / 8)   // ~125 ms of data
-
-            if link.pendingBytes > budget {
-                self.stats.framesDroppedLocal += 1
-                self.congestedStreak += 1
-                self.adaptBitrate(congested: true)
-                return
+    /// The video path never touches `@Published` state. The UI just reads a snapshot twice a
+    /// second, which is plenty for a statistics readout and costs the stream nothing.
+    private func startStatsSampling() {
+        statsTimer?.invalidate()
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let pump = self.pump else { return }
+                pump.refreshLinkStats()
+                let snapshot = pump.stats.snapshot()
+                if snapshot != self.stats { self.stats = snapshot }
             }
-            self.congestedStreak = 0
-            self.adaptBitrate(congested: false)
-            encoder.encode(pixelBuffer: pixelBuffer, captureTimeMicros: captureTime)
         }
-    }
-
-    /// Plain AIMD: back off hard when the link is congested, creep back up when it is not.
-    private func adaptBitrate(congested: Bool) {
-        guard settings.adaptiveBitrate else { return }
-        let now = MonotonicClock.millis()
-
-        if congested {
-            guard congestedStreak >= 3, now - lastBitrateChange > 500 else { return }
-            let reduced = max(settings.minimumBitrateKbps, Int(Double(currentBitrateKbps) * 0.75))
-            if reduced != currentBitrateKbps {
-                currentBitrateKbps = reduced
-                encoder?.updateBitrate(kbps: reduced)
-                lastBitrateChange = now
-                Log.video("congestion, bitrate -> \(reduced) kbps")
-            }
-        } else {
-            guard now - lastBitrateChange > 3_000, currentBitrateKbps < settings.targetBitrateKbps else { return }
-            let raised = min(settings.targetBitrateKbps, currentBitrateKbps + max(1_000, currentBitrateKbps / 10))
-            currentBitrateKbps = raised
-            encoder?.updateBitrate(kbps: raised)
-            lastBitrateChange = now
-        }
-    }
-
-    private func send(_ frame: VideoEncoder.EncodedFrame) {
-        link?.send(.videoFrame,
-                   flags: frame.isKeyframe ? FrameFlags.keyframe : 0,
-                   payload: frame.data,
-                   timestampMicros: frame.captureTimeMicros)
-        stats.record(frameBytes: frame.data.count)
-        stats.bitrateKbps = currentBitrateKbps
     }
 }
 
-// MARK: - Settings
-
-struct HostSettings: Codable, Equatable {
-    var preferHEVC = true
-    var maxFPS = 60
-    var targetBitrateKbps = 45_000
-    var minimumBitrateKbps = 6_000
-    var adaptiveBitrate = true
-    /// Caps encoder QP so a busy frame degrades in framerate rather than in sharpness.
-    var prioritiseTextClarity = true
-    var acceptRemoteInput = true
-    var allowPeerToPeer = false
-    var pairingCode: String? = nil
-}

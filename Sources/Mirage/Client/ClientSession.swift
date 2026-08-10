@@ -21,18 +21,27 @@ final class ClientSession: ObservableObject {
 
     let renderer = VideoRenderer()
     private let advertiser = DisplayAdvertiser()
-    private var link: PeerLink?
+    private var link: PeerLink? {
+        didSet { linkForRendering = link }
+    }
+    /// Reachable from the render and network queues without touching the main actor.
+    private nonisolated(unsafe) var linkForRendering: PeerLink?
     private var presenter: ReceiverWindowController?
     private var inputForwarder: InputForwarder?
-    private var pingTimer: Timer?
     private var statsTimer: Timer?
-    private var bytesSinceReport = 0
-    private var roundTripSamples: [Double] = []
+    private var reportTimer: Timer?
+
+    /// Decode and present happen here, never on the main actor. A serial queue also keeps
+    /// frames in the order they arrived — `Task { @MainActor }` did not, which could hand the
+    /// decoder an out-of-order frame.
+    private let renderQueue = DispatchQueue(label: "com.voxturr.mirage.render", qos: .userInteractive)
+    private let collector = StatsCollector()
+    private nonisolated(unsafe) var bytesSinceReport = 0
 
     init(settings: ClientSettings) {
         self.settings = settings
         renderer.onNeedsKeyframe = { [weak self] in
-            Task { @MainActor in self?.link?.send(.requestKeyframe) }
+            self?.linkForRendering?.send(.requestKeyframe)
         }
     }
 
@@ -59,8 +68,8 @@ final class ClientSession: ObservableObject {
     }
 
     func stop() {
-        pingTimer?.invalidate(); pingTimer = nil
         statsTimer?.invalidate(); statsTimer = nil
+        reportTimer?.invalidate(); reportTimer = nil
         inputForwarder?.stop(); inputForwarder = nil
         presenter?.close(); presenter = nil
         link?.send(.bye)
@@ -79,7 +88,31 @@ final class ClientSession: ObservableObject {
             Task { @MainActor in self?.sendHello() }
         }
         link.onMessage = { [weak self] type, flags, timestamp, payload in
-            Task { @MainActor in self?.handle(type: type, flags: flags, timestamp: timestamp, payload: payload) }
+            guard let self else { return }
+            // The hot path: straight onto the render queue, in order, with no actor hop and
+            // no SwiftUI invalidation. Control messages are rare enough to hop.
+            if type == .videoFrame {
+                let isKeyframe = flags & FrameFlags.keyframe != 0
+                self.renderQueue.async {
+                    self.bytesSinceReport += payload.count
+                    self.collector.record(frameBytes: payload.count)
+                    self.renderer.enqueue(frameData: payload, isKeyframe: isKeyframe)
+                    // Tells the host this frame is through; it will not run more than a few
+                    // frames ahead of us, which is what keeps end-to-end latency bounded.
+                    self.linkForRendering?.send(.frameAck, timestampMicros: timestamp)
+                    self.collector.update {
+                        $0.framesDroppedLocal = self.renderer.framesDropped
+                        $0.decodeMs = self.renderer.decodeMsAverage
+                    }
+                }
+                return
+            }
+            if type == .videoParams {
+                guard let sets = try? JSONDecoder().decode(VideoParameterSets.self, from: payload) else { return }
+                self.renderQueue.async { self.renderer.apply(parameterSets: sets) }
+                return
+            }
+            Task { @MainActor in self.handle(type: type, flags: flags, timestamp: timestamp, payload: payload) }
         }
         link.onFailure = { [weak self] error in
             Task { @MainActor in
@@ -125,26 +158,6 @@ final class ClientSession: ObservableObject {
             presentFullScreen(ack: ack)
             startTimers()
 
-        case .videoParams:
-            guard let sets = try? JSONDecoder().decode(VideoParameterSets.self, from: payload) else { return }
-            renderer.apply(parameterSets: sets)
-
-        case .videoFrame:
-            bytesSinceReport += payload.count
-            stats.record(frameBytes: payload.count)
-            renderer.enqueue(frameData: payload, isKeyframe: flags & FrameFlags.keyframe != 0)
-            stats.framesDroppedLocal = renderer.framesDropped
-            stats.decodeMs = renderer.decodeMsAverage
-
-        case .pong:
-            let rtt = Double(MonotonicClock.micros() &- timestamp) / 1000.0
-            roundTripSamples.append(rtt)
-            if roundTripSamples.count > 20 { roundTripSamples.removeFirst() }
-            stats.roundTripMs = roundTripSamples.reduce(0, +) / Double(roundTripSamples.count)
-
-        case .ping:
-            link?.send(.pong, timestampMicros: timestamp)
-
         case .bye:
             presenter?.close(); presenter = nil
             link?.close(); link = nil
@@ -177,22 +190,33 @@ final class ClientSession: ObservableObject {
         }
     }
 
+    /// Samples counters for the UI and reports them upstream. The heartbeat itself lives in
+    /// PeerLink now, measured on the network queue, so the number is the link's latency
+    /// rather than this app's main-thread queue depth.
     private func startTimers() {
-        pingTimer?.invalidate()
-        pingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.link?.send(.ping) }
-        }
         statsTimer?.invalidate()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                let report = ClientStats(framesDecoded: self.renderer.framesDecoded,
-                                         framesDropped: self.renderer.framesDropped,
-                                         averageLatencyMs: self.stats.roundTripMs,
-                                         decodeMsAverage: self.renderer.decodeMsAverage,
-                                         bytesReceived: self.bytesSinceReport)
-                self.bytesSinceReport = 0
-                self.link?.sendJSON(.stats, report)
+                let rtt = self.link?.roundTripMs ?? 0
+                self.collector.update { $0.roundTripMs = rtt }
+                let snapshot = self.collector.snapshot()
+                if snapshot != self.stats { self.stats = snapshot }
+            }
+        }
+        reportTimer?.invalidate()
+        reportTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.renderQueue.async {
+                    let report = ClientStats(framesDecoded: self.renderer.framesDecoded,
+                                             framesDropped: self.renderer.framesDropped,
+                                             averageLatencyMs: self.link?.roundTripMs ?? 0,
+                                             decodeMsAverage: self.renderer.decodeMsAverage,
+                                             bytesReceived: self.bytesSinceReport)
+                    self.bytesSinceReport = 0
+                    self.linkForRendering?.sendJSON(.stats, report)
+                }
             }
         }
     }

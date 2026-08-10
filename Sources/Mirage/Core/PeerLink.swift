@@ -17,7 +17,10 @@ enum LinkParameters {
         tcp.keepaliveCount = 3
         tcp.keepaliveInterval = 2
         tcp.connectionTimeout = 8
-        tcp.noPush = true
+        // noPush is TCP_NOPUSH — it *corks* the socket until a full segment accumulates.
+        // It must stay off here; leaving it on held frames in the send buffer and added
+        // well over a second of latency on its own.
+        tcp.noPush = false
         tcp.disableAckStretching = true       // keep the ACK clock tight on Wi-Fi
 
         let parameters = NWParameters(tls: nil, tcp: tcp)
@@ -64,6 +67,18 @@ final class PeerLink {
     private var channel: SecureChannel?
     private var outbox: [(MessageType, UInt8, Data, UInt64)] = []
 
+    // Heartbeat, run entirely on the link's own queue.
+    private var heartbeatTimer: DispatchSourceTimer?
+    private var _roundTripMs: Double = 0
+
+    /// Network round-trip time. Measured here rather than in the session layer: ping and pong
+    /// are both handled on this queue, so the number reflects the link instead of how busy
+    /// the other side's main thread happens to be.
+    var roundTripMs: Double {
+        lock.lock(); defer { lock.unlock() }
+        return _roundTripMs
+    }
+
     /// Bytes handed to the kernel that have not yet been reported as sent. The encoder
     /// uses this as its congestion signal.
     var pendingBytes: Int {
@@ -90,6 +105,7 @@ final class PeerLink {
             switch state {
             case .ready:
                 self.receiveHeader()
+                self.startHeartbeat()
                 if let handshake = self.handshake {
                     self.transmit(.keyExchange, flags: 0, payload: handshake.message(),
                                   timestampMicros: MonotonicClock.micros())
@@ -112,7 +128,21 @@ final class PeerLink {
     func close() {
         guard !closed else { return }
         closed = true
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
         connection.cancel()
+    }
+
+    private func startHeartbeat() {
+        heartbeatTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in
+            guard let self, !self.closed else { return }
+            self.transmit(.ping, flags: 0, payload: Data(), timestampMicros: MonotonicClock.micros())
+        }
+        timer.resume()
+        heartbeatTimer = timer
     }
 
     private func fail(_ error: Error?) {
@@ -164,7 +194,9 @@ final class PeerLink {
         let header = MessageHeader(type: type, flags: flags,
                                    payloadLength: UInt32(body.count),
                                    timestampMicros: timestampMicros)
-        var out = header.encoded()
+        var out = Data()
+        out.reserveCapacity(MessageHeader.byteCount + body.count)
+        out.append(header.encoded())
         out.append(body)
 
         lock.lock(); _pendingBytes += out.count; lock.unlock()
@@ -197,7 +229,14 @@ final class PeerLink {
         }
     }
 
-    private func receivePayload(header: MessageHeader, headerBytes: Data, accumulated: Data = Data()) {
+    private func receivePayload(header: MessageHeader, headerBytes: Data, accumulated: Data? = nil) {
+        // Reserve the whole frame up front. A keyframe arrives in many chunks, and growing
+        // the buffer per chunk turned reassembly into repeated reallocation and copying.
+        var accumulated = accumulated ?? {
+            var buffer = Data()
+            buffer.reserveCapacity(Int(header.payloadLength))
+            return buffer
+        }()
         let remaining = Int(header.payloadLength) - accumulated.count
         connection.receive(minimumIncompleteLength: 1, maximumLength: remaining) { [weak self] data, _, isComplete, error in
             guard let self else { return }
@@ -206,12 +245,11 @@ final class PeerLink {
                 if isComplete { self.fail(nil) }
                 return
             }
-            var buffer = accumulated
-            buffer.append(data)
-            if buffer.count < Int(header.payloadLength) {
-                self.receivePayload(header: header, headerBytes: headerBytes, accumulated: buffer)
+            accumulated.append(data)
+            if accumulated.count < Int(header.payloadLength) {
+                self.receivePayload(header: header, headerBytes: headerBytes, accumulated: accumulated)
             } else {
-                self.deliver(header: header, headerBytes: headerBytes, payload: buffer)
+                self.deliver(header: header, headerBytes: headerBytes, payload: accumulated)
                 self.receiveHeader()
             }
         }
@@ -221,6 +259,23 @@ final class PeerLink {
         if header.type == .keyExchange {
             completeHandshake(with: payload)
             return
+        }
+
+        // Heartbeat never reaches the session layer. Replying inline means the peer's
+        // measurement is of the network, not of our main thread's queue depth.
+        switch header.type {
+        case .ping:
+            transmit(.pong, flags: 0, payload: Data(), timestampMicros: header.timestampMicros)
+            return
+        case .pong:
+            let sample = Double(MonotonicClock.micros() &- header.timestampMicros) / 1000.0
+            lock.lock()
+            // Light smoothing so a single scheduling hiccup does not dominate the readout.
+            _roundTripMs = _roundTripMs == 0 ? sample : _roundTripMs * 0.8 + sample * 0.2
+            lock.unlock()
+            return
+        default:
+            break
         }
 
         var body = payload

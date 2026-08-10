@@ -116,7 +116,7 @@ cd mirage
 make                 # build a native .app into build/
 make run             # build and launch
 make dmg             # universal .dmg for both Macs -> build/Mirage.dmg
-make test            # protocol, codec and virtual-display checks
+make test            # protocol, codec, virtual-display and latency checks
 make icon            # regenerate the app icon
 make clean
 ```
@@ -182,6 +182,28 @@ orphaned phantom monitors.
 
 ## Latency
 
+Measured end to end (capture stamp → decoded) at 2880×1800, 60 fps, by `Tests/LatencyHarness`:
+**~19 ms median, 27 ms p95** — and unchanged at ~20 ms while the main thread is deliberately
+jammed for over a second.
+
+Getting there meant fixing three separate things, each of which alone was enough to ruin it:
+
+- **`TCP_NOPUSH` was on.** `NWProtocolTCP.Options.noPush` corks the socket until a full segment
+  accumulates. Frames sat in the send buffer; socket-to-arrival time was **1828 ms** on
+  loopback. Turning it off took that to **0.9 ms**. This was by far the biggest cause.
+- **The video path ran through `@MainActor`.** Every captured and every received frame hopped
+  to the main actor and mutated `@Published` statistics, invalidating the whole SwiftUI panel
+  up to 180×/second. `Task { @MainActor }` also makes *no ordering guarantee*, so frames could
+  reach the decoder out of order. Capture → encode → send and receive → decode now run on their
+  own queues; the UI samples a snapshot twice a second.
+- **Backpressure only watched the socket.** `pendingBytes` reports what Network.framework
+  accepted from us, not what the far end consumed, so a slow receiver was invisible and frames
+  queued without limit. The receiver now acknowledges each frame and the sender allows only a
+  few unacknowledged frames in flight, which bounds latency no matter which stage is slowest —
+  encoder, link, or decoder.
+
+Beyond that:
+
 - `TCP_NODELAY`, plus `serviceClass = .interactiveVideo` so Wi-Fi puts the stream in the video
   access category ahead of bulk traffic.
 - VideoToolbox low-latency rate control with B-frames disabled, so no frame waits on a future
@@ -220,6 +242,7 @@ variants tested). Doing it at the application layer keeps it testable.
 | `Tests/Harness` | framing, packed structs, 400 KB messages, encrypted and wrong-code paths over loopback |
 | `Tests/CodecHarness` | 2880×1800 encode → wire bytes → decode, PSNR verified, hardware decode confirmed |
 | `Tests/DisplayHarness` | the helper creates a true Retina display at three geometries and removes it on exit |
+| `Tests/LatencyHarness` | end-to-end frame latency at 2880×1800, per-stage breakdown, ordering, and a run with the main thread jammed |
 
 ## Layout
 
@@ -245,6 +268,9 @@ flows; only discovery breaks.
 **Text looks soft.** The app warns when the virtual display didn't take a Retina mode.
 Disconnect and reconnect; if it persists, check the receiving Mac isn't running a non-integer
 scaled resolution.
+
+**`0 fps` in the overlay.** Expected when the extended display is static — ScreenCaptureKit
+only emits a frame when something actually changes.
 
 **Connected but nothing on screen.** Press `s` on the receiving Mac for live stats. Detailed
 logs: `log stream --predicate 'subsystem == "com.voxturr.mirage"'`.

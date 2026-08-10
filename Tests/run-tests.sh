@@ -5,6 +5,7 @@
 #   1. protocol  — framing, packed structs, encrypted + wrong-code paths over loopback
 #   2. codec     — 2880x1800 encode -> wire bytes -> decode, PSNR checked
 #   3. display   — the helper process actually creates a Retina virtual display
+#   4. latency   — end-to-end frame latency, including with the main thread jammed
 #
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -18,24 +19,32 @@ check() { if [ "$1" -ne 0 ]; then echo "  FAILED"; FAILED=1; fi; }
 
 CORE="Sources/Mirage/Core/Protocol.swift Sources/Mirage/Core/PeerLink.swift Sources/Mirage/Core/SecureChannel.swift Sources/Mirage/Support/Log.swift"
 
-step "1/3  protocol"
+step "1/4  protocol"
 swiftc -O $CORE Tests/Harness/main.swift -o "$TMP/linktest" 2>&1 | grep -E "error:" && FAILED=1
 "$TMP/linktest";              check $?
 "$TMP/linktest" --psk;        check $?
 "$TMP/linktest" --psk --wrong-code; check $?
 
-step "2/3  codec"
+step "2/4  codec"
 swiftc -O Sources/Mirage/Core/Protocol.swift Sources/Mirage/Support/Log.swift \
           Sources/Mirage/Host/VideoEncoder.swift Sources/Mirage/Client/VideoRenderer.swift \
           Tests/CodecHarness/main.swift -o "$TMP/codectest" 2>&1 | grep -E "error:" && FAILED=1
 "$TMP/codectest"; check $?
 
-step "3/3  virtual display (via helper process)"
+step "3/4  virtual display (via helper process)"
 swift build -c release >/dev/null 2>&1
 BIN=$(swift build -c release --show-bin-path)
 MIRAGE_HELPER="$BIN/MirageDisplayHelper" swiftc -O \
   Sources/Mirage/Support/Log.swift Tests/DisplayHarness/main.swift -o "$TMP/displaytest" 2>&1 | grep -E "error:" && FAILED=1
 MIRAGE_HELPER="$BIN/MirageDisplayHelper" "$TMP/displaytest"; check $?
+
+step "4/4  end-to-end latency"
+swiftc -O $CORE Sources/Mirage/Support/Stats.swift \
+          Sources/Mirage/Host/VideoEncoder.swift Sources/Mirage/Host/FramePump.swift \
+          Sources/Mirage/Host/HostSettings.swift Sources/Mirage/Client/VideoRenderer.swift \
+          Tests/LatencyHarness/main.swift -o "$TMP/latencytest" 2>&1 | grep -E "error:" && FAILED=1
+"$TMP/latencytest";            check $?
+JAM_MAIN=1 "$TMP/latencytest"; check $?
 
 if [ "$FAILED" -eq 0 ]; then
   printf "\n\033[32mALL TESTS PASSED\033[0m\n"

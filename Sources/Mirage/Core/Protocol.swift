@@ -23,6 +23,7 @@ enum MessageType: UInt8 {
     case input           = 0x20   // client -> host, packed InputEvent
     case stats           = 0x30   // client -> host, JSON ClientStats
     case requestKeyframe = 0x31   // client -> host, empty
+    case frameAck        = 0x32   // client -> host, empty; echoes the frame's timestamp
     case ping            = 0x40
     case pong            = 0x41
     case bye             = 0x50
