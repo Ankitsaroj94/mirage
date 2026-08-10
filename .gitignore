@@ -1,0 +1,15 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Build products
+build/
+*.dSYM/
+
+# Generated: run `make icon` to rebuild from Tools/make-icon.swift
+Resources/Mirage.icns
+Resources/Mirage.iconset/
+
+# macOS
+.DS_Store

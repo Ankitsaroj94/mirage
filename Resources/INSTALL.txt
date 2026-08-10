@@ -1,0 +1,47 @@
+Mirage — use one Mac as an extended display for another, over Wi-Fi
+===================================================================
+
+INSTALL (do this on BOTH Macs)
+
+  1. Drag Mirage into the Applications folder.
+
+  2. Open Terminal and run this once, or macOS will refuse to launch it:
+
+         xattr -dr com.apple.quarantine /Applications/Mirage.app
+
+     (The app is signed but not notarised, so macOS quarantines it when it
+     arrives by disk image. This clears that flag.)
+
+  3. Open Mirage.
+
+
+SET UP
+
+  On the Mac you want to USE AS THE EXTRA SCREEN (the 2017 MacBook Pro):
+      choose "Be a display", then "Make this Mac available".
+      No permissions are needed on this side.
+
+  On your MAIN Mac (the M1 Pro):
+      choose "Send my screen".
+      The first time, grant Screen Recording when asked, then quit and
+      reopen Mirage — macOS only re-reads that permission at launch.
+      Pick the other Mac from the list and press Connect.
+
+  A new display appears in System Settings › Displays. Arrange it there so
+  it sits where the second Mac physically is.
+
+
+WHILE CONNECTED
+
+  esc    disconnect and give the second Mac its screen back
+  s      show frame rate, bitrate and latency
+
+
+NOTES
+
+  Both Macs should be on the same 5 GHz or 6 GHz Wi-Fi network. That is much
+  faster than the "direct Wi-Fi" option, which is only there for when no
+  shared network exists.
+
+  Optional: turning on "Accept keyboard and trackpad from the other Mac"
+  needs Accessibility permission on the main Mac.

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Mirage</string>
+	<key>CFBundleDisplayName</key>
+	<string>Mirage</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.voxturr.mirage</string>
+	<key>CFBundleExecutable</key>
+	<string>Mirage</string>
+	<key>CFBundleIconFile</key>
+	<string>Mirage</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>LSUIElement</key>
+	<false/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+
+	<!-- Shown when macOS asks for Screen Recording on the sending Mac. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Mirage does not use the camera.</string>
+
+	<!-- Required for Bonjour discovery on macOS 13+. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Mirage finds your other Mac on the local network and streams the extended display to it.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_mirage._tcp</string>
+	</array>
+</dict>
+</plist>
