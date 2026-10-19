@@ -2,6 +2,9 @@ package com.voxturr.mirage.core
 
 // Wire format — see spec/PROTOCOL.md. Byte-for-byte compatible with Sources/Mirage/Core/Protocol.swift.
 
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
 object MessageType {
     const val HELLO = 0x01
     const val HELLO_ACK = 0x02
@@ -18,6 +21,16 @@ object MessageType {
     const val KEY_EXCHANGE = 0x60
     const val AUDIO_CONFIG = 0x70
     const val AUDIO_STOP = 0x71
+
+    /**
+     * Types this build understands. Anything else is read, opened (so the cipher counter stays
+     * in step) and dropped — that is the whole forward-compatibility contract (spec §2).
+     */
+    fun isKnown(type: Int): Boolean = when (type) {
+        HELLO, HELLO_ACK, VIDEO_PARAMS, VIDEO_FRAME, RECONFIGURE, INPUT, STATS, REQUEST_KEYFRAME,
+        FRAME_ACK, PING, PONG, BYE, KEY_EXCHANGE, AUDIO_CONFIG, AUDIO_STOP -> true
+        else -> false
+    }
 }
 
 object FrameFlags {
@@ -26,18 +39,42 @@ object FrameFlags {
 
 const val PROTOCOL_VERSION = 2
 
-/** 16-byte little-endian header. */
+/**
+ * 16-byte little-endian header. [type] is kept as a raw byte so an unknown (newer) type decodes
+ * instead of failing; [timestampMicros] is a u64 on the wire, carried as the same 64 bits.
+ */
 data class MessageHeader(
     val type: Int,
     val flags: Int = 0,
     val payloadLength: Int,
     val timestampMicros: Long = MonotonicClock.micros(),
 ) {
-    fun encoded(): ByteArray = TODO("agent 4")
+    fun encoded(): ByteArray = ByteArray(BYTE_COUNT).also { encodeInto(it, 0) }
+
+    /** Writes the 16 bytes at [offset] — lets PeerLink build header + body in one array. */
+    fun encodeInto(dst: ByteArray, offset: Int) {
+        ByteBuffer.wrap(dst, offset, BYTE_COUNT).order(ByteOrder.LITTLE_ENDIAN)
+            .put(type.toByte())
+            .put(flags.toByte())
+            .putShort(0)
+            .putInt(payloadLength)
+            .putLong(timestampMicros)
+    }
 
     companion object {
         const val BYTE_COUNT = 16
-        fun decode(bytes: ByteArray, offset: Int = 0): MessageHeader = TODO("agent 4")
+
+        /** @throws IllegalArgumentException if fewer than 16 bytes are available. */
+        fun decode(bytes: ByteArray, offset: Int = 0): MessageHeader {
+            require(bytes.size - offset >= BYTE_COUNT) { "header needs $BYTE_COUNT bytes" }
+            val b = ByteBuffer.wrap(bytes, offset, BYTE_COUNT).order(ByteOrder.LITTLE_ENDIAN)
+            return MessageHeader(
+                type = b.get(offset).toInt() and 0xff,
+                flags = b.get(offset + 1).toInt() and 0xff,
+                payloadLength = b.getInt(offset + 4),
+                timestampMicros = b.getLong(offset + 8),
+            )
+        }
     }
 }
 
@@ -81,11 +118,45 @@ data class InputEvent(
     val modifiers: Int = 0,
     val isPreciseScroll: Boolean = false,
 ) {
-    fun encoded(): ByteArray = TODO("agent 4")
+    fun encoded(): ByteArray {
+        val out = ByteArray(BYTE_COUNT)
+        ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN)
+            .put(kind.toByte())
+            .put(button.toByte())
+            .put(clickCount.toByte())
+            .put(if (isPreciseScroll) 1 else 0)
+            .putFloat(x)
+            .putFloat(y)
+            .putFloat(deltaX)
+            .putFloat(deltaY)
+            .putShort(keyCode.toShort())
+            .putShort(0)                     // padding
+            .putInt(modifiers)              // bytes 28..31 stay zero
+        return out
+    }
 
     companion object {
         const val BYTE_COUNT = 32
-        fun decode(bytes: ByteArray, offset: Int = 0): InputEvent? = TODO("agent 4")
+
+        /** Null if too short or the kind is unknown — the Mac host drops those too. */
+        fun decode(bytes: ByteArray, offset: Int = 0): InputEvent? {
+            if (bytes.size - offset < BYTE_COUNT) return null
+            val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            val kind = bytes[offset].toInt() and 0xff
+            if (kind !in InputKind.MOUSE_MOVE..InputKind.FLAGS_CHANGED) return null
+            return InputEvent(
+                kind = kind,
+                button = bytes[offset + 1].toInt() and 0xff,
+                clickCount = bytes[offset + 2].toInt() and 0xff,
+                isPreciseScroll = bytes[offset + 3].toInt() != 0,
+                x = b.getFloat(offset + 4),
+                y = b.getFloat(offset + 8),
+                deltaX = b.getFloat(offset + 12),
+                deltaY = b.getFloat(offset + 16),
+                keyCode = b.getShort(offset + 20).toInt() and 0xffff,
+                modifiers = b.getInt(offset + 24),
+            )
+        }
     }
 }
 
