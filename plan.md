@@ -144,7 +144,7 @@ Mac side needs no change for input beyond what exists (`InputInjector`).
 
 ## Phase 4 — Android host role (Mac as extended display for Android)
 
-Requires **Shizuku** (user installs it, starts it once per reboot via Wireless debugging — no PC needed). Mirage runs a Shizuku **UserService** (shell uid) for the privileged parts; everything else stays in the normal app.
+Needs shell-level privilege (only system/shell code can host other apps on a second display and inject input). **Primary: the Mac starts it over adb**, scrcpy-style. Mirage on the Mac (`Host/AdbLauncher.swift`) finds `adb` and runs `app_process` with the installed APK as classpath, so `ServerMain` runs as the shell uid on the tablet. It connects back to the Mac's listener over Wi-Fi (not tunnelled through adb). That needs only USB debugging, which is already on, or a one-time wireless-adb pairing; nothing extra is installed. **Optional: Shizuku**, which runs the same server in a Shizuku UserService so it can be started from the tablet alone.
 
 - **Discovery**: Android browses `_mirage._tcp` (NsdManager); Mac runs "Be a display" exactly as today. Mac `ClientSession` sends `ClientHello` with its panel → Android host.
 - **Virtual display** (`host/privileged/DisplayService.kt`): `DisplayManager.createVirtualDisplay` sized to the Mac panel px, `densityDpi = 160 × backingScale` (Mac 2× → 320 dpi → dp width == Mac points, desktop-sized UI), flags `PUBLIC | OWN_CONTENT_ONLY | TRUSTED | OWN_DISPLAY_GROUP | ALWAYS_UNLOCKED | SUPPORTS_TOUCH | DESTROY_CONTENT_ON_REMOVAL`, and **Surface = the encoder's input surface** (zero-copy GPU → encoder).
