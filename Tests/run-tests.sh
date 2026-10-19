@@ -63,6 +63,13 @@ swiftc -O $CORE Sources/Mirage/Support/Stats.swift \
 "$TMP/latencytest";            check $?
 JAM_MAIN=1 "$TMP/latencytest"; check $?
 
+# Audio: ring buffer, spec vector, playout scheduler (fake clock), UDP loopback. No permissions.
+step "audio"
+swiftc -O Sources/Mirage/Core/Protocol.swift Sources/Mirage/Support/Log.swift \
+          Sources/Mirage/Host/VideoEncoder.swift Sources/Mirage/Host/HostSettings.swift \
+          Sources/Mirage/Host/Audio/*.swift Tests/AudioHarness/main.swift -o "$TMP/audiotest" 2>&1 | grep -E "error:" && FAILED=1
+"$TMP/audiotest"; check $?
+
 if [ "$FAILED" -eq 0 ]; then
   printf "\n\033[32mALL TESTS PASSED\033[0m\n"
 else

@@ -31,6 +31,11 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Mirage does not use the camera.</string>
 
+	<!-- Shown when macOS asks for System Audio Recording (the Core Audio tap that sends this
+	     Mac's sound to a tablet). Without this key the tap silently records nothing. -->
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Mirage plays this Mac's sound on your tablet, in sync with the Mac's own speakers.</string>
+
 	<!-- Required for Bonjour discovery on macOS 13+. -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Mirage finds your other Mac on the local network and streams the extended display to it.</string>
