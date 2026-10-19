@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.voxturr.mirage"
+    namespace = "in.ankitsaroj.mirage"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.voxturr.mirage"
+        applicationId = "in.ankitsaroj.mirage"
         // XDH (X25519) is native from API 33, so no BouncyCastle. Built for Android 16.
         minSdk = 33
         targetSdk = 36

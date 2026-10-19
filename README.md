@@ -26,9 +26,14 @@ overlay in the corner is the tablet's live stats (press the back gesture → *Sh
 
 <img src="docs/tablet-extended-desktop.jpg" alt="Galaxy Tab S9 FE showing the Mac's extended desktop">
 
-| Mac — sending to the tablet | Tablet — "Be a display" | Tablet — "Send my screen" |
+| Mac — tablet found over USB | Tablet — "Be a display" | Tablet — "Send my screen" |
 |---|---|---|
-| <img src="docs/sender-android.png" width="260" alt="Mac sender pane extending to a Galaxy Tab"> | <img src="docs/tablet-be-a-display.jpg" width="330" alt="Tablet home screen"> | <img src="docs/tablet-send-my-screen.jpg" width="330" alt="Tablet send-my-screen screen"> |
+| <img src="docs/sender-adb.png" width="260" alt="Mac sender pane listing a Galaxy Tab connected over USB"> | <img src="docs/tablet-be-a-display.jpg" width="330" alt="Tablet home screen"> | <img src="docs/tablet-send-my-screen.jpg" width="330" alt="Tablet send-my-screen screen"> |
+
+And the other way round: the tablet's second desktop (One UI's DeX desktop, with resizable app
+windows and a taskbar) shown full screen on the Mac, started from the Mac with one click.
+
+<img src="docs/mac-android-desktop.jpg" alt="Android desktop with Calculator and Clock windows, shown on the Mac">
 
 See [CHANGELOG.md](CHANGELOG.md) for everything that changed.
 
@@ -144,46 +149,67 @@ second Mac physically is.
 
 ### Android tablet as the display
 
-On the tablet: open Mirage → **Be a display**. On the Mac: **Send my screen** → the tablet shows
-up with a tablet icon and an **Android** badge → pick a **Screen size** → **Connect**.
+**Plugged in with USB (or paired for wireless debugging)?** Nothing to do on the tablet. The
+Mac lists it under **Send my screen → Available displays** as *Connected via USB* within a couple
+of seconds; press **Connect** and Mirage starts *Be a display* on the tablet over adb, reads the
+tablet's Wi-Fi address, and connects to it directly — the video goes over Wi-Fi, not through the
+cable (if the two don't share a network, it falls back to tunnelling through adb, without sound).
+Needs *Developer options → USB debugging* on the tablet and Android platform-tools on the Mac
+(`adb` from Android Studio or `brew install android-platform-tools`).
 
-The tablet goes full screen and appears in System Settings › Displays like any monitor. Touch
-taps and drags, a long press right-clicks, two fingers scroll; the S Pen hovers and clicks, and a
-Book Cover or Bluetooth keyboard types into the Mac. Rotate the tablet and the Mac rebuilds the
+**Over Wi-Fi only:** on the tablet open Mirage → **Be a display**; on the Mac the tablet shows up
+with a tablet icon and an **Android** badge → pick a **Screen size** → **Connect**. The tablet
+always listens on port **47800** first, so its address stays the same between sessions.
+
+The tablet goes full screen and appears in System Settings › Displays like any monitor, and
+**its touchscreen operates the Mac**: tap to click, drag to drag, long-press (or two-finger tap)
+to right-click, two fingers to scroll; the S Pen hovers and clicks, and a Book Cover or Bluetooth
+keyboard types into the Mac. This needs **Accessibility** permission for Mirage on the Mac
+(System Settings › Privacy & Security › Accessibility) — without it macOS silently drops the
+touches. Rotate the tablet and the Mac rebuilds the
 display in portrait (the screen blinks for about a second).
 
 The back gesture opens a small menu: **Disconnect**, **Show stats** (codec, frame rate,
 bitrate, decode time, round trip, audio buffer and sync error).
 
-If the tablet doesn't appear in the list, use **Connect by address…** with the address the
-tablet shows under *Be a display* (see [Troubleshooting](#troubleshooting)). From a script:
+If the tablet doesn't appear in the list, plug it in, or use **Connect by address…** with the
+address the tablet shows under *Be a display* (see [Troubleshooting](#troubleshooting)). From a
+script:
 
 ```bash
-open /Applications/Mirage.app --args --connect 192.168.1.17:38407
+open /Applications/Mirage.app --args --connect adb                  # first tablet adb can see
+open /Applications/Mirage.app --args --connect adb:RZ2Y100CEYK      # a specific one
+open /Applications/Mirage.app --args --connect 192.168.1.17:47800   # by address
 ```
 
-### Mac as a display for Android *(experimental)*
+### Mac as a display for Android
 
-The other direction: the Mac shows a **second Android desktop** — Samsung's DeX desktop, with
-its taskbar, app drawer and resizable windows — driven by the Mac's mouse and keyboard.
+The other direction: the Mac shows a **second Android desktop** — One UI's DeX desktop, with its
+taskbar, app drawer and resizable windows — full screen, driven by the Mac's mouse and keyboard.
 
 Android doesn't let an ordinary app put a desktop on another screen or inject input into it.
 Code running as the `adb shell` user can, so Mirage's tablet app contains a small server that
-is started with shell rights — no root, no extra app:
+is started with shell rights — no root, no extra app.
 
-- **From the Mac over adb (recommended).** *Developer options → USB debugging* on (tap *Build
-  number* seven times in *About tablet → Software information* to unlock Developer options), plug
-  the tablet in once, allow the Mac. Wireless debugging works too after a one-time pairing.
-- **From the tablet with [Shizuku](https://shizuku.rikka.app) (optional).** Install Shizuku,
-  start it via *Wireless debugging*, then *Send my screen → Shizuku* in Mirage. Shizuku stops on
-  every reboot.
+**With the tablet plugged in (recommended):** on the Mac choose **Be a display**. Tablets adb can
+see are listed under **Android over adb**; press **Show its desktop here**. Mirage makes the Mac
+available, starts the tablet's server over adb aimed at the Mac's Wi-Fi address, and the desktop
+appears. **Stop** (or quitting Mirage) removes it and restores the tablet. From a script:
+`open /Applications/Mirage.app --args --show-android adb`.
 
-On the Mac choose **Be a display** → **Make this Mac available** (it shows its address), then
-start the server. Until the Mac app grows a button for this, it's one command:
+Needs *Developer options → USB debugging* (tap *Build number* seven times in *About tablet →
+Software information* to unlock Developer options). Wireless debugging works too after a
+one-time pairing.
+
+**From the tablet alone, with [Shizuku](https://shizuku.rikka.app) (optional):** install
+Shizuku, start it via *Wireless debugging*, then *Send my screen → Shizuku* in Mirage. Shizuku
+stops on every reboot.
+
+**By hand**, which is what the button does:
 
 ```bash
-APK=$(adb shell pm path com.voxturr.mirage | sed -n 's/^package://p')
-adb shell CLASSPATH=$APK app_process / com.voxturr.mirage.host.privileged.ServerMain \
+APK=$(adb shell pm path in.ankitsaroj.mirage | sed -n 's/^package://p')
+adb shell CLASSPATH=$APK app_process / in.ankitsaroj.mirage.host.privileged.ServerMain \
     --host <Mac IP> --port <Mac port>      # optional: --code 1234 --fps 60 --bitrate 30000
 ```
 
@@ -191,10 +217,11 @@ It prints `CONNECTING`, `CONNECTED`, then `OK <displayId> <w>x<h> <codec> <fps>`
 line every second; closing the command (Ctrl-C) removes the display and restores every setting.
 Over a cable only, add `adb reverse tcp:<port> tcp:<port>` and pass `--host 127.0.0.1`.
 
-What's verified on the Tab S9 FE: a trusted virtual display created this way gets One UI's full
-DeX desktop (not a mirror), injected mouse clicks open apps on it, and the HEVC encoder delivers
-2304×1440 at 19–22 ms display-to-encoded (p50). The full tablet → Mac session has not yet been
-exercised end to end; treat it as experimental.
+Verified on the Tab S9 FE → M1 Pro: the tablet builds a 3456×2234 display at 320 dpi (Mac-sized
+UI), encodes it with the Exynos HEVC encoder at 60 fps, and the Mac shows it full screen; apps
+open on it as windows; stopping removes the display cleanly. Still experimental — it relies on
+hidden Android APIs, and driving it with the Mac's own mouse and keyboard hasn't been tried by
+hand yet (the injection path was verified on the tablet).
 
 ### Screen size (Android tablets)
 
@@ -267,6 +294,7 @@ out and sound stays on the Mac. The first time, macOS asks for **System Audio Re
 | Receiving Mac | *none* | — |
 | Tablet, *Be a display* | Nearby devices / notifications | Finding the Mac; the foreground-service notification while connected |
 | Tablet, *Send my screen* | USB debugging (adb), or Shizuku | Creating the extra Android desktop and injecting the Mac's input |
+| Tablet, listed automatically | USB debugging | The Mac finding and starting it over adb (optional — Wi-Fi discovery and addresses work without it) |
 
 ---
 
@@ -463,6 +491,9 @@ under **Be a display** once it's available (the tablet shows the same on its scr
 sending Mac, **Connect by address…** under *Available displays*, and type them in. A phone or
 tablet hotspot, or USB tethering, also works when the router is the problem.
 
+**The tablet never shows up.** Plug it in with USB debugging on: tablets adb can see are listed
+without any network discovery. Otherwise:
+
 **The tablet never shows up, but Macs do.** Samsung's Wi-Fi power saving can drop multicast;
 keep Mirage open in the foreground while you connect, or use **Connect by address…**. Logs:
 `adb logcat -s Mirage`. On the network Mirage was tested on, `dns-sd -B _services._dns-sd._udp
@@ -473,6 +504,11 @@ devices — and connecting by address worked first time.
 and that Mirage is ticked in System Settings › Privacy & Security › *System Audio Recording*.
 The tablet logs a line every 5 s (`adb logcat -s Mirage | grep audio`) with packets received,
 played and refused, the clock state and the sync error.
+
+**Touching the tablet does nothing on the Mac.** Give Mirage *Accessibility* permission on the
+Mac (System Settings › Privacy & Security › Accessibility, or **Open Settings** next to *Accept
+keyboard, trackpad and touch* in Mirage), and make sure that option is ticked. A rebuild signed
+with the same identity keeps the grant.
 
 **Sound breaks up.** The delay should rise on its own within ~10 s; if it doesn't, raise
 **Delay** by hand. Turning off AirDrop and Handoff on the Mac removes most Wi-Fi hiccups.

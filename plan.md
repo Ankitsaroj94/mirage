@@ -90,7 +90,7 @@ Pure function, unit-tested:
 
 ## Phase 2 — Android app, receiver role (Mac → tablet)
 
-New Gradle project `android/` (Kotlin 2.x, Compose, compileSdk 36, **minSdk 33** — native `XDH` X25519; primary target Android 16). Package `com.voxturr.mirage`.
+New Gradle project `android/` (Kotlin 2.x, Compose, compileSdk 36, **minSdk 33** — native `XDH` X25519; primary target Android 16). Package `in.ankitsaroj.mirage`.
 
 ```
 android/app/src/main/java/com/voxturr/mirage/

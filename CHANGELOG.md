@@ -10,7 +10,7 @@ tablet in sync with the Mac's own speakers. Built and tested on a Samsung Galaxy
 
 ### New
 
-- **Android app** (`android/`, Kotlin + Jetpack Compose, Android 13+).
+- **Android app** `in.ankitsaroj.mirage` (`android/`, Kotlin + Jetpack Compose, Android 13+).
   - **Be a display:** the tablet becomes a real extended display of the Mac (a System Settings ›
     Displays entry, not a mirror). It decodes with hardware HEVC in low-latency mode onto a
     `SurfaceView` overlay, holds a low-latency Wi-Fi lock, and runs full screen and immersive.
@@ -20,12 +20,12 @@ tablet in sync with the Mac's own speakers. Built and tested on a Samsung Galaxy
   - **Rotation:** turning the tablet rebuilds the Mac's virtual display in the new orientation.
   - **Stats overlay** behind the back gesture: codec, fps, bitrate, decode time, round trip,
     audio buffer and sync error.
-- **Mac as a display for Android** *(experimental)*. A small server inside the tablet app runs
+- **Mac as a display for Android** *(experimental)*. Now verified end to end: Tab S9 FE →
+  M1 Pro at 3456×2234, 60 fps HEVC, with apps opening as windows on it. A small server inside the tablet app runs
   with shell rights, started from the Mac over adb or from the tablet with Shizuku. It creates a
   trusted virtual display that One UI fills with its full DeX desktop, encodes it straight from
   the GPU surface, and injects the Mac's mouse and keyboard. The Mac side is the existing
-  receiver, unchanged. Verified on the device: desktop, input and encoder. Not yet exercised end
-  to end.
+  receiver, unchanged.
 - **Synced sound, Mac → tablet** (macOS 14.2+). The Mac's system audio is captured with a Core
   Audio process tap and sent as 48 kHz PCM over UDP in Wi-Fi's voice queue. The Mac holds its
   own speakers back by the same delay, so both play together.
@@ -39,6 +39,17 @@ tablet in sync with the Mac's own speakers. Built and tested on a Samsung Galaxy
     looks like 1152×720.
   - *Larger text*, *More space* and *Most space* are scaled modes, like macOS's own.
   - The choice is made per device, on the Mac or the tablet.
+- **Tablets plugged in over USB appear automatically** (or paired for wireless debugging).
+  The Mac watches `adb devices`, so a connected tablet with Mirage shows up as *Connected via
+  USB* with no Bonjour needed. **Connect** starts *Be a display* on the tablet over adb, reads
+  its Wi-Fi address and connects directly; if the two share no network, it tunnels through
+  `adb forward` instead.
+- **"Show its desktop here"** under *Be a display*: one click starts the tablet's
+  second-desktop server over adb, aimed at this Mac. Stop, or quitting Mirage, removes it.
+- **`--connect adb[:serial]`** and **`--show-android adb[:serial]`** launch arguments for
+  scripts.
+- The tablet's receiver listens on a **fixed port, 47800**, falling back to any free port, so
+  its address stays the same between sessions.
 - **Connect by address** on the Mac for networks that block Bonjour multicast. Both receivers
   show their address and port.
 - **`--connect host:port` launch argument**: `open Mirage.app --args --connect 192.168.1.17:38407`.
@@ -77,6 +88,11 @@ code. Both the Swift and the Kotlin test suites check against them.
     85 ms off. A much tighter sample now replaces the estimate outright.
   - A fixed 60 ms delay couldn't cover real Wi-Fi jitter. The default is now 100 ms, and the
     delay adapts.
+- **The Android host server crashed when it built the display.** It created its shell Context
+  lazily on the encoder thread, and `Looper.prepareMainLooper()` throws on a thread that
+  already has a Looper. The Context is now built on the server's main thread at startup.
+- **The Mac panel opened scrolled to the bottom.** AppKit scrolled the first focusable control
+  (a slider) into view, hiding the device list.
 - **Screen Recording when launched from a terminal.** The README now explains that starting
   `Mirage.app/Contents/MacOS/Mirage` directly attributes the permission to the terminal.
 

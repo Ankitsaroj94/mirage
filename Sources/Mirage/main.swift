@@ -28,8 +28,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// same as "Connect by address…". Handy for scripts and for testing against a tablet.
     private func connectFromCommandLine() {
         let arguments = CommandLine.arguments
+        if let index = arguments.firstIndex(of: "--show-android"), index + 1 < arguments.count {
+            let target = arguments[index + 1]
+            showAndroidDesktop(serial: target.hasPrefix("adb:") ? String(target.dropFirst(4)) : nil, attempt: 0)
+            return
+        }
         guard let index = arguments.firstIndex(of: "--connect"), index + 1 < arguments.count else { return }
         let target = arguments[index + 1]
+        if target == "adb" || target.hasPrefix("adb:") {
+            connectToAdbDevice(serial: target.hasPrefix("adb:") ? String(target.dropFirst(4)) : nil, attempt: 0)
+            return
+        }
         guard let colon = target.lastIndex(of: ":"),
               let port = UInt16(target[target.index(after: colon)...]),
               let display = DiscoveredDisplay.manual(host: String(target[..<colon]), port: port) else {
@@ -38,6 +47,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         Log.app("connecting to \(target) from the command line")
         model.connect(to: display)
+    }
+
+    /// `--show-android adb` (or `adb:<serial>`): *Be a display* → "Show its desktop here".
+    private func showAndroidDesktop(serial: String?, attempt: Int) {
+        guard let match = model.adbDevices.first(where: { $0.hasMirage && (serial == nil || $0.serial == serial) }) else {
+            if attempt < 50 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.showAndroidDesktop(serial: serial, attempt: attempt + 1) }
+            } else {
+                Log.app("--show-android: no adb device with Mirage installed")
+            }
+            return
+        }
+        model.role = .receive
+        model.showAndroidDesktop(from: match)
+    }
+
+    /// `--connect adb` (first tablet with Mirage) or `--connect adb:<serial>`: the same as
+    /// pressing Connect on a tablet listed through adb. adb's device list fills in a moment
+    /// after launch, so this waits for it.
+    private func connectToAdbDevice(serial: String?, attempt: Int) {
+        let match = model.adbDevices.first { $0.hasMirage && (serial == nil || $0.serial == serial) }
+        guard let match else {
+            if attempt < 50 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.connectToAdbDevice(serial: serial, attempt: attempt + 1) }
+            } else {
+                Log.app("--connect adb: no adb device with Mirage installed")
+            }
+            return
+        }
+        Log.app("connecting to \(match.name) over adb from the command line")
+        model.connectViaAdb(DiscoveredDisplay(adb: match))
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -49,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // desktop arrangement.
         model.host.disconnect()
         model.client.stop()
+        model.stopAllAndroidDesktops()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

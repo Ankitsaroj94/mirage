@@ -24,10 +24,19 @@ final class AppModel: ObservableObject {
     @Published var usePairingCode = false
     @Published var screenRecordingGranted = false
     @Published var showingConnectByAddress = false
+    /// Android devices adb can see (plugged in, or paired for wireless debugging).
+    @Published var adbDevices: [AdbDevice] = []
+    /// The adb device being set up right now, so its row can show progress.
+    @Published var adbBusySerial: String?
+    @Published var adbError: String?
+    /// "Show its desktop here": the running server per device, and its latest status line.
+    @Published var androidDesktopStatus: [String: String] = [:]
+    private var androidDesktops: [String: Process] = [:]
 
     let host: HostSession
     let client: ClientSession
     private let browser = DisplayBrowser()
+    private let adb = AdbBridge()
 
     /// Host settings survive relaunches so per-tablet screen sizes are remembered by name.
     private static let hostSettingsKey = "hostSettings"
@@ -42,7 +51,125 @@ final class AppModel: ObservableObject {
         self.client = ClientSession(settings: clientSettings)
 
         browser.onUpdate = { [weak self] displays in self?.discovered = displays }
+        adb.onUpdate = { [weak self] devices in self?.adbDevices = devices }
+        adb.start()
         refreshPermissions()
+    }
+
+    // MARK: adb
+
+    /// Displays to list under *Send my screen*: adb tablets with Mirage installed first (they
+    /// need no network discovery), then whatever Bonjour found, minus duplicates by name.
+    var sendTargets: [DiscoveredDisplay] {
+        let viaAdb = adbDevices.filter(\.hasMirage).map(DiscoveredDisplay.init(adb:))
+        return viaAdb + discovered.filter { found in !viaAdb.contains { $0.name == found.name } }
+    }
+
+    /// Starts "Be a display" on the tablet over adb, then connects straight to it over Wi-Fi.
+    func connectViaAdb(_ display: DiscoveredDisplay) {
+        guard let serial = display.adbSerial, adbBusySerial == nil else { return }
+        adbBusySerial = serial
+        adbError = nil
+        applySettings()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try AdbBridge.prepareReceiver(on: serial) }
+            DispatchQueue.main.async {
+                self.adbBusySerial = nil
+                switch result {
+                case .success(let target):
+                    if target.viaForward {
+                        Log.app("adb: no shared Wi-Fi with \(display.name), tunnelling through adb")
+                    }
+                    guard let manual = DiscoveredDisplay.manual(host: target.host, port: target.port,
+                                                                name: display.name) else { return }
+                    self.host.connect(to: manual)
+                case .failure(let error):
+                    self.adbError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    /// *Be a display* for an Android tablet: makes this Mac available, then starts the tablet's
+    /// host server over adb, aimed back here.
+    func showAndroidDesktop(from device: AdbDevice) {
+        guard androidDesktops[device.serial] == nil else { return }
+        adbError = nil
+        applySettings()
+        if case .idle = client.state { client.startAdvertising() }
+        androidDesktopStatus[device.serial] = "Starting…"
+
+        // The listener's port is published asynchronously; give it a moment.
+        func launch(attempt: Int) {
+            guard let port = client.listeningPort else {
+                if attempt < 25 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { launch(attempt: attempt + 1) }
+                } else {
+                    androidDesktopStatus[device.serial] = nil
+                    adbError = "This Mac couldn't start listening for the tablet."
+                }
+                return
+            }
+            let code = usePairingCode ? pairingCode : nil
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let process = try AdbBridge.startAndroidDesktop(on: device.serial, macPort: port, pairingCode: code,
+                        onLine: { line in
+                            DispatchQueue.main.async { self.androidDesktopStatus[device.serial] = Self.describe(serverLine: line) }
+                        },
+                        onExit: { status in
+                            DispatchQueue.main.async {
+                                self.androidDesktops[device.serial] = nil
+                                if status != 0, let last = self.androidDesktopStatus[device.serial], !last.hasPrefix("Stopped") {
+                                    self.adbError = last
+                                }
+                                self.androidDesktopStatus[device.serial] = nil
+                            }
+                        })
+                    DispatchQueue.main.async { self.androidDesktops[device.serial] = process }
+                } catch {
+                    DispatchQueue.main.async {
+                        self.androidDesktopStatus[device.serial] = nil
+                        self.adbError = error.localizedDescription
+                    }
+                }
+            }
+        }
+        launch(attempt: 0)
+    }
+
+    func stopAndroidDesktop(on serial: String) {
+        guard let process = androidDesktops[serial] else { return }
+        androidDesktopStatus[serial] = "Stopped"
+        // EOF on stdin is the server's clean shutdown; terminate is the backstop.
+        try? (process.standardInput as? Pipe)?.fileHandleForWriting.close()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { if process.isRunning { process.terminate() } }
+    }
+
+    func stopAllAndroidDesktops() {
+        for serial in androidDesktops.keys { stopAndroidDesktop(on: serial) }
+    }
+
+    /// Turns the server's status lines (README, "Mac as a display for Android") into UI text.
+    private static func describe(serverLine line: String) -> String {
+        let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+        switch parts.first {
+        case "CONNECTING": return "Connecting to this Mac…"
+        case "CONNECTED":  return "Connected, building the desktop…"
+        case "OK":
+            // OK <displayId> <w>x<h> <codec> <fps>
+            let f = line.split(separator: " ")
+            return f.count >= 5 ? "Showing the Android desktop · \(f[2]) \(f[3].uppercased()) \(f[4]) fps" : "Showing the Android desktop"
+        case "STATS":
+            let fields = Dictionary(uniqueKeysWithValues: (parts.count > 1 ? parts[1] : "").split(separator: " ").compactMap { pair -> (String, String)? in
+                let kv = pair.split(separator: "=", maxSplits: 1)
+                return kv.count == 2 ? (String(kv[0]), String(kv[1])) : nil
+            })
+            return "Showing the Android desktop · \(fields["fps"] ?? "?") fps · \(fields["kbps"].flatMap { Int($0) }.map { "\($0 / 1000) Mbps" } ?? "?") · \(fields["rtt"] ?? "?") ms"
+        case "BYE": return "Stopped"
+        case "ERR": return parts.count > 1 ? parts[1] : "The tablet reported an error."
+        default:    return line
+        }
     }
 
     func startBrowsing() {
@@ -90,6 +217,8 @@ final class AppModel: ObservableObject {
 
 struct ControlPanel: View {
     @ObservedObject var model: AppModel
+    private static let top = "top"
+
 
     var body: some View {
         VStack(spacing: 0) {
@@ -102,21 +231,30 @@ struct ControlPanel: View {
 
             Divider()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text(model.role.explanation)
-                        .font(.callout)
-                        .foregroundColor(.secondary)
+            ScrollViewReader { scroller in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(model.role.explanation)
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                            .id(Self.top)
 
-                    switch model.role {
-                    case .send:    SenderPane(model: model)
-                    case .receive: ReceiverPane(model: model)
+                        switch model.role {
+                        case .send:    SenderPane(model: model)
+                        case .receive: ReceiverPane(model: model)
+                        }
+
+                        Divider()
+                        SharedSettingsPane(model: model)
                     }
-
-                    Divider()
-                    SharedSettingsPane(model: model)
+                    .padding(16)
                 }
-                .padding(16)
+                // AppKit scrolls the first focusable control into view at launch — a slider near
+                // the bottom — which hid the device list. Start at the top, and again per role.
+                .onAppear {
+                    DispatchQueue.main.async { scroller.scrollTo(Self.top, anchor: .top) }
+                }
+                .onChange(of: model.role) { _ in scroller.scrollTo(Self.top, anchor: .top) }
             }
         }
         .frame(width: 460, height: 620)
@@ -157,7 +295,7 @@ private struct SenderPane: View {
 
             GroupBox("Available displays") {
                 VStack(spacing: 6) {
-                    if model.discovered.isEmpty {
+                    if model.sendTargets.isEmpty {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
                             Text("Looking for a Mac or Android tablet running Mirage…")
@@ -166,18 +304,32 @@ private struct SenderPane: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(2)
                     } else {
-                        ForEach(model.discovered) { display in
+                        ForEach(model.sendTargets) { display in
                             DiscoveredRow(display: display,
                                           scale: display.isAndroid ? model.scalePreference(for: display) : nil,
-                                          isBusy: isConnecting(display),
+                                          isBusy: isConnecting(display) || (display.adbSerial != nil && display.adbSerial == model.adbBusySerial),
                                           isConnected: isConnected(display)) {
-                                model.connect(to: display)
+                                if display.adbSerial != nil { model.connectViaAdb(display) } else { model.connect(to: display) }
                             } disconnect: {
                                 model.host.disconnect()
                             }
                         }
                     }
+                    if let error = model.adbError {
+                        Text(error).font(.caption).foregroundColor(.red)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    let missing = model.adbDevices.filter { !$0.hasMirage }
+                    if !missing.isEmpty {
+                        Text("\(missing.map(\.name).joined(separator: ", ")) is connected over adb but doesn't have Mirage installed (make android-install).")
+                            .font(.caption).foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     HStack {
+                        if AdbBridge.isAvailable {
+                            Text("Tablets plugged in over USB (or paired for wireless debugging) appear here automatically.")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
                         Spacer()
                         Button("Connect by address…") { model.showingConnectByAddress = true }
                             .controlSize(.small)
@@ -277,7 +429,7 @@ private struct SenderPane: View {
     }
 
     private func isConnected(_ display: DiscoveredDisplay) -> Bool {
-        if case .running = host.state { return true }
+        if case .running(let name) = host.state { return name == display.name || display.adbSerial == nil }
         return false
     }
 }
@@ -313,7 +465,7 @@ private struct DiscoveredRow: View {
                             Image(systemName: "lock.fill").font(.caption2).foregroundColor(.secondary)
                         }
                     }
-                    if display.pixelWidth > 0 {
+                    if display.pixelWidth > 0 || display.adbTransport != nil {
                         Text(display.isAndroid ? display.resolutionSummary
                                                : "\(display.resolutionSummary) · \(display.scaledSummary)")
                             .font(.caption).foregroundColor(.secondary)
@@ -477,6 +629,38 @@ private struct ReceiverPane: View {
                         .font(.caption).foregroundColor(.secondary).padding(.top, 2)
                 }
                 .padding(6)
+            }
+
+            if !model.adbDevices.isEmpty {
+                GroupBox("Android over adb") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.adbDevices) { device in
+                            HStack {
+                                Image(systemName: device.isWireless ? "wifi" : "cable.connector")
+                                    .foregroundColor(.accentColor).frame(width: 24)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(device.name).fontWeight(.medium)
+                                    Text(model.androidDesktopStatus[device.serial]
+                                         ?? (device.hasMirage ? "\(device.model) · \(device.transportSummary)" : "Mirage isn't installed on it"))
+                                        .font(.caption).foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                if model.androidDesktopStatus[device.serial] != nil {
+                                    Button("Stop") { model.stopAndroidDesktop(on: device.serial) }
+                                } else {
+                                    Button("Show its desktop here") { model.showAndroidDesktop(from: device) }
+                                        .disabled(!device.hasMirage)
+                                }
+                            }
+                        }
+                        if let error = model.adbError {
+                            Text(error).font(.caption).foregroundColor(.red)
+                        }
+                        Text("Starts the tablet's second desktop over adb and shows it full screen here. Experimental.")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                    .padding(6)
+                }
             }
 
             GroupBox("Options") {

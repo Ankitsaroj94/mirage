@@ -24,11 +24,16 @@ struct DiscoveredDisplay: Identifiable, Equatable {
     /// True for an entry made by `manual(host:port:)`: nothing is known about the panel
     /// until the device's hello arrives.
     var isManual: Bool = false
+    /// Set for a tablet found through adb rather than Bonjour; connecting goes through
+    /// `AdbBridge.prepareReceiver` first.
+    var adbSerial: String? = nil
+    var adbTransport: String? = nil
 
     var isAndroid: Bool { platform == "android" }
 
     var resolutionSummary: String {
-        isManual ? "Entered by address" : "\(pixelWidth)×\(pixelHeight) @ \(refreshHz)Hz"
+        if let adbTransport { return "Connected \(adbTransport)" }
+        return isManual ? "Entered by address" : "\(pixelWidth)×\(pixelHeight) @ \(refreshHz)Hz"
     }
     var scaledSummary: String { isManual ? "" : "looks like \(pointWidth)×\(pointHeight)" }
 
@@ -37,10 +42,10 @@ struct DiscoveredDisplay: Identifiable, Equatable {
     /// any discovered display. `host` is an IP address or host name, `port` the TCP port the
     /// receiving side shows ("Be a display" lists it; on a Mac it is
     /// `ClientSession.listeningPort`). Returns nil for an empty host or port 0.
-    static func manual(host: String, port: UInt16) -> DiscoveredDisplay? {
+    static func manual(host: String, port: UInt16, name: String? = nil) -> DiscoveredDisplay? {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, port != 0, let nwPort = NWEndpoint.Port(rawValue: port) else { return nil }
-        return DiscoveredDisplay(name: "\(trimmed):\(port)",
+        return DiscoveredDisplay(name: name ?? "\(trimmed):\(port)",
                                  endpoint: .hostPort(host: NWEndpoint.Host(trimmed), port: nwPort),
                                  pixelWidth: 0, pixelHeight: 0, pointWidth: 0, pointHeight: 0,
                                  refreshHz: 60,
@@ -48,6 +53,19 @@ struct DiscoveredDisplay: Identifiable, Equatable {
                                  // set on only one side the key exchange fails with a clear error.
                                  requiresPairingCode: false,
                                  isManual: true)
+    }
+}
+
+extension DiscoveredDisplay {
+    /// A tablet adb can see. Its panel is unknown until its hello arrives; the row shows how it
+    /// is attached instead.
+    init(adb device: AdbDevice) {
+        self.init(name: device.name,
+                  endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: AdbBridge.receiverPort)!),
+                  pixelWidth: 0, pixelHeight: 0, pointWidth: 0, pointHeight: 0,
+                  refreshHz: 60, requiresPairingCode: false,
+                  platform: "android", isManual: true,
+                  adbSerial: device.serial, adbTransport: device.transportSummary)
     }
 }
 
