@@ -46,6 +46,13 @@
         <!-- AGENT-5: end -->
 
         <!-- AGENT-6: host activity/service entries go below this line -->
+        <!-- "Send my screen". Started by the home screen; the privileged part runs as shell
+             (ServerMain over adb, or the Shizuku UserService), so nothing else is declared. -->
+        <activity
+            android:name=".host.HostActivity"
+            android:exported="false"
+            android:label="Send my screen"
+            android:windowSoftInputMode="adjustResize" />
 
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
