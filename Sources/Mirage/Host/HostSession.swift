@@ -51,6 +51,8 @@ final class HostSession: ObservableObject {
     private var audio: AudioStreamer?
     /// UDP port the running audio stream targets, so a reconfigure can tell whether to restart it.
     private var audioTargetPort: Int?
+    /// Audio sequence numbers carry on across restarts within one link (they are the nonce).
+    private var audioNextSeq: UInt32 = 0
     /// Bumped on every teardown. Async steps (capture start, encoder callbacks) check it so a
     /// pipeline that was replaced by a reconfigure cannot act on the link afterwards.
     private var generation = 0
@@ -72,6 +74,7 @@ final class HostSession: ObservableObject {
     func connect(to display: DiscoveredDisplay) {
         disconnect()
         state = .connecting(display.name)
+        audioNextSeq = 0   // new link, new session key
 
         let parameters = LinkParameters.make(allowPeerToPeer: settings.allowPeerToPeer)
         let connection = NWConnection(to: display.endpoint, using: parameters)
@@ -364,7 +367,8 @@ final class HostSession: ObservableObject {
                                      playoutDelayMs: settings.audioPlayoutDelayMs,
                                      syncOffsetMs: settings.audioSyncOffsetMs)
         do {
-            pendingAudioConfig = try streamer.start(host: host, port: udpPort, sessionKey: link.sessionKey)
+            pendingAudioConfig = try streamer.start(host: host, port: udpPort, sessionKey: link.sessionKey,
+                                                    firstSeq: audioNextSeq)
             audio = streamer
             audioTargetPort = port
             isStreamingAudio = true
@@ -387,6 +391,7 @@ final class HostSession: ObservableObject {
         pendingAudioConfig = nil
         guard let audio else { return }
         audio.stop()
+        audioNextSeq = audio.nextSeq
         self.audio = nil
         audioTargetPort = nil
         isStreamingAudio = false

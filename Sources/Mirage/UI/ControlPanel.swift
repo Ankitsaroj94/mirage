@@ -188,7 +188,9 @@ private struct SenderPane: View {
             .sheet(isPresented: $model.showingConnectByAddress) {
                 ConnectByAddressSheet { host, port in
                     model.showingConnectByAddress = false
-                    model.connect(to: .manual(host: host, port: port))
+                    if let display = DiscoveredDisplay.manual(host: host, port: port) {
+                        model.connect(to: display)
+                    }
                 } cancel: {
                     model.showingConnectByAddress = false
                 }
@@ -632,10 +634,6 @@ private struct CalloutBox<Accessory: View>: View {
 }
 
 // MARK: - Helpers
-
-extension DiscoveredDisplay {
-    var isAndroid: Bool { platform == "android" }
-}
 
 /// What each screen-size choice means on a given panel, for the picker's hint. Mirrors the
 /// host's geometry rule (spec/PROTOCOL.md §5): crisp is half the panel's pixels in points,

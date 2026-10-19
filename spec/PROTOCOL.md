@@ -218,7 +218,7 @@ Packet: 16-byte LE header + payload.
 | 0 | 1 | version = 1 |
 | 1 | 1 | flags: bit0 encrypted |
 | 2 | 2 | reserved 0 |
-| 4 | 4 | seq u32 (+1 per packet; restarts at 0 after each audioConfig) |
+| 4 | 4 | seq u32 (+1 per packet; starts at 0 per TCP connection and **never restarts** within it, even across audioConfig — it is the audio nonce. Clients must not assume a new audioConfig starts at 0) |
 | 8 | 8 | hostTimeMicros u64 — host monotonic capture time of the first sample |
 | 16 | n | PCM s16le interleaved, `packetFrames × channels × 2` bytes (960 for 5 ms stereo) |
 

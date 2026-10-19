@@ -14,7 +14,8 @@ import CryptoKit
 ///   * `AudioStreamer.isSupported` — false before macOS 14.2 (no process taps).
 ///   * `start(...)` called after helloAck when the client sent `supportsAudio` + `audioUDPPort`
 ///     and `mode != .off`; returns the AudioConfig to send as `.audioConfig`. Calling it again
-///     restarts the stream (sequence numbers start over, as the spec requires).
+///     restarts the stream. Pass `firstSeq: nextSeq` of the previous stream on the same link:
+///     sequence numbers never repeat within a connection, because they are the audio nonce.
 ///   * `stop()` on disconnect / teardown; restores normal Mac audio. Safe to call repeatedly.
 ///
 /// Not thread-safe itself: call it from one thread (the session's).
@@ -34,6 +35,9 @@ final class AudioStreamer {
     private var sender: AudioSender?
     private var playout: LocalPlayout?
 
+    /// Where the sequence numbers stopped, for the next stream on the same link.
+    private(set) var nextSeq: UInt32 = 0
+
     init(mode: AudioMode, playoutDelayMs: Int, syncOffsetMs: Int) {
         self.mode = mode
         self.playoutDelayMs = playoutDelayMs
@@ -42,7 +46,7 @@ final class AudioStreamer {
 
     deinit { stop() }
 
-    func start(host: NWEndpoint.Host, port: UInt16, sessionKey: SymmetricKey?) throws -> AudioConfig {
+    func start(host: NWEndpoint.Host, port: UInt16, sessionKey: SymmetricKey?, firstSeq: UInt32 = 0) throws -> AudioConfig {
         guard mode != .off else { throw MirageError("Audio streaming is turned off.") }
         guard #available(macOS 14.2, *) else {
             throw MirageError("Sending the Mac's sound needs macOS 14.2 or later.")
@@ -51,7 +55,7 @@ final class AudioStreamer {
 
         let ring = CaptureRing()
         let wake = DispatchSemaphore(value: 0)
-        let sender = AudioSender(host: host, port: port, key: sessionKey)
+        let sender = AudioSender(host: host, port: port, key: sessionKey, firstSeq: firstSeq)
 
         do {
             // Speakers and socket first, tap last: the tap is what mutes the Mac, so by the time
@@ -107,6 +111,7 @@ final class AudioStreamer {
         pump = nil
         playout?.stop()
         playout = nil
+        if let sender { nextSeq = sender.nextSeq }
         sender?.stop()
         sender = nil
     }

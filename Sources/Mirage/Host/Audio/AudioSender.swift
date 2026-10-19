@@ -118,10 +118,16 @@ final class AudioSender {
     private let connection: NWConnection
     private let key: SymmetricKey?
     private let queue = DispatchQueue(label: "com.voxturr.mirage.audio.udp", qos: .userInteractive)
-    private var seq: UInt32 = 0
+    private var seq: UInt32
     private(set) var packetsSent = 0
 
-    init(host: NWEndpoint.Host, port: UInt16, key: SymmetricKey?) {
+    /// The sequence number the next packet will carry. Read only after the pump has stopped.
+    var nextSeq: UInt32 { seq }
+
+    /// `firstSeq` continues where the previous stream on this link stopped: the audio nonce is
+    /// the sequence number under the session key, so restarting at 0 would reuse nonces.
+    init(host: NWEndpoint.Host, port: UInt16, key: SymmetricKey?, firstSeq: UInt32 = 0) {
+        self.seq = firstSeq
         let parameters = NWParameters.udp
         parameters.serviceClass = .interactiveVoice
         parameters.prohibitedInterfaceTypes = [.cellular]
