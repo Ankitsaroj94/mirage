@@ -20,6 +20,7 @@ enum MessageType: UInt8 {
     case helloAck        = 0x02   // host -> client, JSON HostHelloAck
     case videoParams     = 0x10   // host -> client, JSON VideoParameterSets
     case videoFrame      = 0x11   // host -> client, AVCC-framed NAL units
+    case reconfigure     = 0x12   // client -> host, JSON ClientHello (v2: rotation / scale change)
     case input           = 0x20   // client -> host, packed InputEvent
     case stats           = 0x30   // client -> host, JSON ClientStats
     case requestKeyframe = 0x31   // client -> host, empty
@@ -28,6 +29,8 @@ enum MessageType: UInt8 {
     case pong            = 0x41
     case bye             = 0x50
     case keyExchange     = 0x60   // either direction, cleartext X25519 public key + HMAC
+    case audioConfig     = 0x70   // host -> client, JSON AudioConfig (v2)
+    case audioStop       = 0x71   // host -> client, empty (v2)
 }
 
 enum FrameFlags {
@@ -87,6 +90,14 @@ struct ClientHello: Codable {
     var supportsHEVC: Bool
     var supportsH264: Bool
     var wantsInputForwarding: Bool
+
+    // v2. Optional so a v1 peer's JSON still decodes; nil is omitted on the wire.
+    var platform: String? = nil            // "macos" | "android"; nil = macos
+    var physicalDPI: Double? = nil
+    var scalePreference: String? = nil     // ScalePreference raw value
+    var supportsAudio: Bool? = nil
+    var audioUDPPort: Int? = nil
+    var orientation: String? = nil         // "landscape" | "portrait"
 }
 
 struct HostHelloAck: Codable {
@@ -102,6 +113,9 @@ struct HostHelloAck: Codable {
     var bitrateKbps: Int
     /// False when the virtual display would not take a 2x mode; the client shows a warning.
     var isHiDPI: Bool
+    // v2
+    var platform: String? = nil
+    var audioAvailable: Bool? = nil
 }
 
 enum VideoCodec: String, Codable {
@@ -126,6 +140,16 @@ struct ClientStats: Codable {
     var decodeMsAverage: Double
     /// Bytes the client has received since the last report; lets the host see goodput.
     var bytesReceived: Int
+}
+
+/// Starts (or restarts) the UDP audio stream to the client's `audioUDPPort`. See spec/PROTOCOL.md §7.
+struct AudioConfig: Codable, Equatable {
+    var sampleRate: Int = 48_000
+    var channels: Int = 2
+    var format: String = "s16le"
+    var packetFrames: Int = 240
+    var playoutDelayMs: Int = 60
+    var encrypted: Bool = false
 }
 
 // MARK: - Input events (packed, 32 bytes)
