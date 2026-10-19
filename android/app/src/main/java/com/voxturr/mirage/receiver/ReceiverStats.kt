@@ -15,6 +15,8 @@ class ReceiverStats {
     @Volatile var roundTripMs = 0.0
     @Volatile var audioBufferedMs = 0.0
     @Volatile var audioErrorMs = 0.0
+    /** Playout delay we need from the host, 0 = no measurement yet. */
+    @Volatile var audioDelayNeededMs = 0
     @Volatile var streamWidth = 0
     @Volatile var streamHeight = 0
     @Volatile var codec = ""

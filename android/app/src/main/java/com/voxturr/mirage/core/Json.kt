@@ -188,8 +188,11 @@ data class ClientStats(
     val averageLatencyMs: Double,
     val decodeMsAverage: Double,
     val bytesReceived: Int,
+    /** v2: playout delay this client needs to play every audio packet on time (spec §7). */
+    val audioDelayNeededMs: Int? = null,
 ) {
     fun toJson(): ByteArray = JSONObject()
+        .apply { audioDelayNeededMs?.let { put("audioDelayNeededMs", it) } }
         .put("framesDecoded", framesDecoded)
         .put("framesDropped", framesDropped)
         .put("averageLatencyMs", finite(averageLatencyMs))
@@ -205,6 +208,7 @@ data class ClientStats(
                 averageLatencyMs = getDouble("averageLatencyMs"),
                 decodeMsAverage = getDouble("decodeMsAverage"),
                 bytesReceived = getInt("bytesReceived"),
+                audioDelayNeededMs = if (has("audioDelayNeededMs")) getInt("audioDelayNeededMs") else null,
             )
         }
     }
@@ -215,7 +219,7 @@ data class AudioConfig(
     val channels: Int = 2,
     val format: String = "s16le",
     val packetFrames: Int = 240,
-    val playoutDelayMs: Int = 60,
+    val playoutDelayMs: Int = 100,
     val encrypted: Boolean = false,
 ) {
     fun toJson(): ByteArray = JSONObject()

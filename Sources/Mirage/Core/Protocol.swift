@@ -186,6 +186,9 @@ struct ClientStats: Codable {
     var decodeMsAverage: Double
     /// Bytes the client has received since the last report; lets the host see goodput.
     var bytesReceived: Int
+    /// v2: the shared audio playout delay this client needs to play every packet on time
+    /// (its p99 arrival age plus its own output latency). The host raises the delay to match.
+    var audioDelayNeededMs: Int? = nil
 }
 
 /// Starts (or restarts) the UDP audio stream to the client's `audioUDPPort`. See spec/PROTOCOL.md §7.
@@ -194,7 +197,7 @@ struct AudioConfig: Codable, Equatable {
     var channels: Int = 2
     var format: String = "s16le"
     var packetFrames: Int = 240
-    var playoutDelayMs: Int = 60
+    var playoutDelayMs: Int = 100
     var encrypted: Bool = false
 }
 

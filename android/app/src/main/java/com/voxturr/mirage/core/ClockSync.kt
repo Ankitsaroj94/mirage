@@ -33,7 +33,10 @@ class ClockSync {
             window.addLast(Sample(t2, roundTrip))
 
             when {
-                !estimated -> { offset = sampleOffset; estimated = true }
+                // A sample's offset can be wrong by up to half its round trip. The first pong
+                // usually queues behind the first keyframe, so the estimate it seeds can be
+                // ~100 ms off; take a much tighter sample outright instead of easing in at 10 %.
+                !estimated || roundTrip * 4 < bestRoundTrip * 3 -> { offset = sampleOffset; estimated = true }
                 windowBest == null || roundTrip <= windowBest -> offset += SMOOTHING * (sampleOffset - offset)
                 else -> return
             }

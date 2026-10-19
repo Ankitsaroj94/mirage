@@ -21,7 +21,7 @@ struct HostSettings: Codable, Equatable {
     var scalePreferences: [String: ScalePreference] = [:]
     var audioMode: AudioMode = .both
     /// Total playout delay shared by both speakers. Larger is more robust to Wi-Fi jitter.
-    var audioPlayoutDelayMs = 60
+    var audioPlayoutDelayMs = 100
     /// Fine-tune nudging the Mac speakers relative to the tablet (positive = Mac later).
     var audioSyncOffsetMs = 0
     var allow120Hz = false

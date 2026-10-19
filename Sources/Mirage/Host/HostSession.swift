@@ -53,6 +53,11 @@ final class HostSession: ObservableObject {
     private var audioTargetPort: Int?
     /// Audio sequence numbers carry on across restarts within one link (they are the nonce).
     private var audioNextSeq: UInt32 = 0
+    /// Playout delay raised at run time because the client could not play on time. Never
+    /// below the user's setting; reset per link.
+    private var adaptiveAudioDelayMs = 0
+    private var lastAudioDelayChange = Date.distantPast
+    private var audioDelayMs: Int { max(settings.audioPlayoutDelayMs, adaptiveAudioDelayMs) }
     /// Bumped on every teardown. Async steps (capture start, encoder callbacks) check it so a
     /// pipeline that was replaced by a reconfigure cannot act on the link afterwards.
     private var generation = 0
@@ -75,6 +80,7 @@ final class HostSession: ObservableObject {
         disconnect()
         state = .connecting(display.name)
         audioNextSeq = 0   // new link, new session key
+        adaptiveAudioDelayMs = 0
 
         let parameters = LinkParameters.make(allowPeerToPeer: settings.allowPeerToPeer)
         let connection = NWConnection(to: display.endpoint, using: parameters)
@@ -168,6 +174,7 @@ final class HostSession: ObservableObject {
         case .stats:
             guard let clientStats = try? JSONDecoder().decode(ClientStats.self, from: payload) else { return }
             pump?.recordRemote(droppedFrames: clientStats.framesDropped, decodeMs: clientStats.decodeMsAverage)
+            if let needed = clientStats.audioDelayNeededMs { adaptAudioDelay(toAtLeast: needed) }
 
         case .bye:
             state = .idle
@@ -364,7 +371,7 @@ final class HostSession: ObservableObject {
             return
         }
         let streamer = AudioStreamer(mode: settings.audioMode,
-                                     playoutDelayMs: settings.audioPlayoutDelayMs,
+                                     playoutDelayMs: audioDelayMs,
                                      syncOffsetMs: settings.audioSyncOffsetMs)
         do {
             pendingAudioConfig = try streamer.start(host: host, port: udpPort, sessionKey: link.sessionKey,
@@ -378,6 +385,24 @@ final class HostSession: ObservableObject {
             streamer.stop()
         }
     }
+
+    /// The tablet measures how late audio packets arrive over this particular Wi-Fi and asks
+    /// for enough delay to play every one; both speakers move to the new delay together, so
+    /// they stay in sync. Only ever raised, at most every 10 s, and capped — a request beyond
+    /// the cap means the network is unusable for audio and more delay would only hurt lip sync.
+    private func adaptAudioDelay(toAtLeast needed: Int) {
+        guard audio != nil, let hello = clientHello else { return }
+        let target = min(needed, Self.maxAudioDelayMs)
+        guard target > audioDelayMs, Date().timeIntervalSince(lastAudioDelayChange) > 10 else { return }
+        adaptiveAudioDelayMs = target
+        lastAudioDelayChange = Date()
+        Log.app("audio: client needs \(needed) ms, raising playout delay to \(target) ms")
+        stopAudio(notifyClient: false)
+        startAudioIfWanted(for: hello)
+        sendAudioConfigIfStarted()
+    }
+
+    private static let maxAudioDelayMs = 250
 
     private func sendAudioConfigIfStarted() {
         guard let config = pendingAudioConfig else { return }

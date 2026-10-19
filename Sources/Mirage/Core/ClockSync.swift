@@ -37,7 +37,10 @@ final class ClockSync: @unchecked Sendable {
         let windowBest = window.map(\.roundTrip).min()
         window.append(Sample(receivedAt: t2, roundTrip: roundTrip))
 
-        if !estimated {
+        // A sample's offset can be wrong by up to half its round trip. The first pong usually
+        // queues behind the first keyframe, so the estimate it seeds can be ~100 ms off; when a
+        // much tighter sample arrives, take it outright rather than easing towards it at 10 %.
+        if !estimated || roundTrip * 4 < bestRoundTrip * 3 {
             offset = sampleOffset
             estimated = true
         } else if windowBest == nil || roundTrip <= windowBest! {

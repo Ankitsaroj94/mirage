@@ -55,6 +55,21 @@ class AudioReceiver {
     private var writer: Thread? = null
     private val writerLock = Object()
 
+    // Diagnostics, logged every 5 s while playing: where packets go missing is otherwise invisible.
+    @Volatile private var rxPackets = 0
+    @Volatile private var rxRejected = 0
+    @Volatile private var rxJitterRefused = 0
+    @Volatile private var rxReordered = 0
+    @Volatile private var rxDuplicate = 0
+    @Volatile private var rxGapPackets = 0
+    private var maxSeenSeq = -1L
+    private val arrivalAges = DoubleArray(1000)
+    @Volatile private var arrivalCount = 0
+    @Volatile private var lastSeq = -1L
+    @Volatile private var rxWrongSource = 0
+    @Volatile private var playedPackets = 0
+    @Volatile private var silencePackets = 0
+
     private val rxThread = Thread({ receiveLoop() }, "mirage-audio-rx").apply { isDaemon = true; start() }
 
     /** Starts (or restarts) playback. [source] = the host's address; packets from elsewhere are ignored. */
@@ -104,13 +119,21 @@ class AudioReceiver {
                 if (closed) return
                 continue
             }
+            rxPackets++
             val cfg = config ?: continue
             val len = packet.length
-            if (len <= AudioPacket.HEADER_BYTES || AudioPacket.version(buf) != AudioPacket.VERSION) continue
+            if (len <= AudioPacket.HEADER_BYTES || AudioPacket.version(buf) != AudioPacket.VERSION) { rxRejected++; continue }
             val src = source
-            if (src != null && packet.address != src) continue
+            if (src != null && packet.address != src) { rxWrongSource++; continue }
             val seq = AudioPacket.seq(buf)
             val hostTime = AudioPacket.hostTimeMicros(buf)
+            clock?.takeIf { it.ready }?.let { c ->
+                val ageMs = (System.nanoTime() - c.hostMicrosToLocalNanos(hostTime)) / 1e6
+                if (arrivalCount < arrivalAges.size) arrivalAges[arrivalCount++] = ageMs
+            }
+            if (seq < maxSeenSeq) rxReordered++
+            if (seq == maxSeenSeq) rxDuplicate++
+            if (seq > maxSeenSeq) { if (maxSeenSeq >= 0 && seq > maxSeenSeq + 1) rxGapPackets += (seq - maxSeenSeq - 1).toInt(); maxSeenSeq = seq }
             if (AudioPacket.flags(buf) and AudioPacket.FLAG_ENCRYPTED != 0) {
                 val ch = channel?.invoke() ?: continue
                 System.arraycopy(buf, 0, header, 0, AudioPacket.HEADER_BYTES)
@@ -118,8 +141,9 @@ class AudioReceiver {
                 val pcm = try { ch.openAudio(seq, header, sealed) } catch (e: Exception) { continue }
                 jitter.put(seq, hostTime, pcm, 0, pcm.size)
             } else if (!cfg.encrypted) {
-                jitter.put(seq, hostTime, buf, AudioPacket.HEADER_BYTES, len - AudioPacket.HEADER_BYTES)
-            }
+                if (!jitter.put(seq, hostTime, buf, AudioPacket.HEADER_BYTES, len - AudioPacket.HEADER_BYTES)) rxJitterRefused++
+                else lastSeq = seq
+            } else rxRejected++
         }
     }
 
@@ -152,6 +176,12 @@ class AudioReceiver {
             Log.e(TAG, "AudioTrack creation failed", e)
             return
         }
+        // Samsung did not grant the fast track here: getMinBufferSize was 80 ms and the track
+        // came up holding 160 ms, which alone blew the whole playout budget (measured 175 ms
+        // to the speaker). The blocking writes keep that buffer full, so its size *is* our
+        // output latency — cut it to two mixer bursts.
+        val burst = (track.bufferSizeInFrames / 8).coerceAtLeast(MIN_BURST_FRAMES)
+        try { track.setBufferSizeInFrames(burst * 2) } catch (_: Exception) {}
 
         val packetFrames = cfg.packetFrames.coerceAtLeast(1)
         val packetUs = packetFrames * 1_000_000L / sr
@@ -195,15 +225,38 @@ class AudioReceiver {
                     written, sr, assumedLatencyNs)
             }
 
+        var lastReport = System.nanoTime()
         try {
             track.play()
             writeSilence(packetFrames) // prime
             while (gen == generation && !Thread.currentThread().isInterrupted) {
+                if (System.nanoTime() - lastReport > 5_000_000_000L) {
+                    lastReport = System.nanoTime()
+                    val n = arrivalCount
+                    if (n > 10) {
+                        val a = arrivalAges.copyOf(n).sorted()
+                        val p99 = a[n * 99 / 100]
+                        val outMs = (nextOutNanos() - System.nanoTime()) / 1e6
+                        // Every packet must be here before it is written, i.e. one output latency
+                        // ahead of its play time. Margin covers the next window being a bit worse.
+                        val needed = ((p99 + outMs + NEEDED_MARGIN_MS) / 10).toInt() * 10 + 10
+                        stats.audioDelayNeededMs = needed
+                        Log.i(TAG, "audio arrival age (capture→here): p50=${"%.1f".format(a[n / 2])} p90=${"%.1f".format(a[n * 9 / 10])} " +
+                            "p99=${"%.1f".format(p99)} max=${"%.1f".format(a[n - 1])} ms (n=$n), output ${"%.1f".format(outMs)} ms → need ${needed} ms")
+                    }
+                    arrivalCount = 0
+                    Log.i(TAG, "audio: rx=$rxPackets rejected=$rxRejected wrongSource=$rxWrongSource " +
+                        "reordered=$rxReordered dup=$rxDuplicate gaps=$rxGapPackets clockReady=${hostClock.ready} refused=$rxJitterRefused lastSeq=$lastSeq newest=${jitter.newestSeq} jitter=${jitter.size} played=$playedPackets " +
+                        "silence=$silencePackets error=${"%.1f".format(stats.audioErrorMs)}ms " +
+                        "trackBuf=${track.bufferSizeInFrames}/${track.bufferCapacityInFrames} minBuf=${minBuf / 4} " +
+                        "outLatency=${"%.1f".format((nextOutNanos() - System.nanoTime()) / 1e6)}ms")
+                }
                 // Nothing to play yet (stream not started, gap, or no clock estimate): keep the
                 // track running on silence so restarting costs no extra latency.
                 if (nextSeq < 0) {
                     if (!hostClock.ready || jitter.size == 0) {
                         if (!hostClock.ready) jitter.discardThrough(jitter.newestSeq)
+                        silencePackets++
                         if (!writeSilence(packetFrames)) break
                         continue
                     }
@@ -229,6 +282,13 @@ class AudioReceiver {
                         if (!writeSilence(minOf(d.frames, sr / 50))) break // ≤20 ms at a time, then re-check
                     }
                     PlayoutController.Action.DROP -> {
+                        // Dropping only helps if something newer is already here. Dropping the
+                        // newest packet when the whole path is slower than the playout delay just
+                        // spins, discarding everything — play late instead of not at all.
+                        if (jitter.newestSeq <= nextSeq) {
+                            controller.acceptLate(error)
+                            continue
+                        }
                         jitter.discardThrough(nextSeq)
                         nextSeq++; lastHostTime = hostTime + packetUs
                     }
@@ -240,6 +300,7 @@ class AudioReceiver {
                             if (!writeSilence(packetFrames)) break
                             continue
                         }
+                        playedPackets++
                         val frames = n / ch
                         if (d.action == PlayoutController.Action.TRIM) {
                             val skip = d.frames.coerceAtMost(frames)
@@ -267,6 +328,9 @@ class AudioReceiver {
     }
 
     private companion object {
+        /** One HAL mixer period on the Tab S9 FE (960 frames = 20 ms at 48 kHz). */
+        const val MIN_BURST_FRAMES = 960
+        const val NEEDED_MARGIN_MS = 15.0
         const val TAG = "Mirage"
         /** ~100 ms of 5 ms packets with nothing arriving → idle. */
         const val IDLE_PACKETS = 20

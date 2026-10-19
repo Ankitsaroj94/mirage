@@ -172,7 +172,10 @@ class PlayoutController(private val sampleRate: Int) {
     var smoothedErrorNanos = 0.0; private set
     private val d = Decision()
 
-    fun reset() { locked = false; smoothedErrorNanos = 0.0 }
+    /** Lateness we have accepted because nothing could fix it (see [acceptLate]). */
+    var lateBiasNanos = 0L; private set
+
+    fun reset() { locked = false; smoothedErrorNanos = 0.0; lateBiasNanos = 0 }
 
     fun decide(errorNanos: Long, packetFrames: Int): Decision {
         d.frames = 0; d.ratio = 1.0
@@ -190,18 +193,32 @@ class PlayoutController(private val sampleRate: Int) {
             }
             return d
         }
-        if (errorNanos > LATE_DROP_NS) { locked = false; d.action = Action.DROP; return d }
-        if (errorNanos < -EARLY_HOLD_NS) {
+        // Accepted lateness shrinks as soon as the path gets faster, never grows back on its own.
+        if (errorNanos < lateBiasNanos) lateBiasNanos = maxOf(0L, errorNanos)
+        val error = errorNanos - lateBiasNanos
+        if (error > LATE_DROP_NS) { locked = false; d.action = Action.DROP; return d }
+        if (error < -EARLY_HOLD_NS) {
             locked = false
-            d.action = Action.SILENCE; d.frames = nanosToFrames(-errorNanos)
+            d.action = Action.SILENCE; d.frames = nanosToFrames(-error)
             return d
         }
-        smoothedErrorNanos += (errorNanos - smoothedErrorNanos) * SMOOTHING
+        smoothedErrorNanos += (error - smoothedErrorNanos) * SMOOTHING
         val errMs = smoothedErrorNanos / 1e6
         val e = if (kotlin.math.abs(errMs) < DEADBAND_MS) 0.0 else errMs
         d.ratio = 1.0 + (e * GAIN_PER_MS).coerceIn(-MAX_DEVIATION, MAX_DEVIATION)
         d.action = Action.PLAY
         return d
+    }
+
+    /**
+     * The path is slower than the playout delay and there is nothing newer to skip to: lock on
+     * the current error rather than dropping forever. Sync is off by [errorNanos] until the
+     * delay is raised, but the audio plays.
+     */
+    fun acceptLate(errorNanos: Long) {
+        locked = true
+        smoothedErrorNanos = 0.0
+        lateBiasNanos = errorNanos
     }
 
     fun nanosToFrames(ns: Long): Int = (ns * sampleRate / 1_000_000_000L).toInt()

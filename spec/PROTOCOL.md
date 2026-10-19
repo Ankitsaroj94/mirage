@@ -127,7 +127,7 @@ prefix. Resent before every IDR.
   "channels": 2,
   "format": "s16le",
   "packetFrames": 240,            // 5 ms
-  "playoutDelayMs": 60,           // playAt = hostTimeMicros + playoutDelayMs*1000 (host clock)
+  "playoutDelayMs": 100,          // playAt = hostTimeMicros + playoutDelayMs*1000 (host clock)
   "encrypted": false
 }
 ```
@@ -236,8 +236,9 @@ instant (Mac: `LocalPlayout`), so both outputs line up.
 
 Each side already pings once a second. With v2 pongs:
 `t0` = ping header timestamp (local), `t1` = pong payload (remote clock), `t2` = local receive time.
-`rtt = t2 − t0`, `offset = t1 − (t0 + t2)/2` (remote − local). Keep the sample with the
-lowest RTT in the last 10 s window; smooth with EWMA α = 0.1 on new minimum-RTT samples.
+`rtt = t2 − t0`, `offset = t1 − (t0 + t2)/2` (remote − local). Seed from the first sample; replace the estimate outright when a sample's RTT is under ¾ of
+the RTT the estimate is based on (the first pong often queues behind the first keyframe);
+otherwise smooth with EWMA α = 0.1 on samples at or below the 10 s window's minimum RTT.
 `remoteToLocal(t) = t − offset`.
 
 Cross-device frame latency (stats overlay) = `localDisplayTime − remoteToLocal(captureTime)`.

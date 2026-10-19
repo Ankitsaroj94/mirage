@@ -155,7 +155,7 @@ let v1Ack = #"{"accepted":false,"reason":"Version mismatch: the other Mac is run
 let decodedAck = try! JSONDecoder().decode(HostHelloAck.self, from: Data(v1Ack.utf8))
 check(decodedAck.isFromV1Host && decodedAck.audioAvailable == nil, "v1 helloAck decode")
 
-let audioConfigJSON = try! JSONDecoder().decode(AudioConfig.self, from: Data(#"{"sampleRate":48000,"channels":2,"format":"s16le","packetFrames":240,"playoutDelayMs":60,"encrypted":false}"#.utf8))
+let audioConfigJSON = try! JSONDecoder().decode(AudioConfig.self, from: Data(#"{"sampleRate":48000,"channels":2,"format":"s16le","packetFrames":240,"playoutDelayMs":100,"encrypted":false}"#.utf8))
 check(audioConfigJSON == AudioConfig(), "AudioConfig defaults match spec §3")
 
 // Unknown types: strict decode refuses, raw decode keeps the byte.
@@ -178,13 +178,18 @@ do {
     // Slow, lopsided sample: would be off by 2.4 ms, must be ignored.
     clock.addSample(t0: 20_000, t1: 20_050 + skew, t2: 25_000)
     check(clock.offsetMicros == Int64(skew), "a high-RTT sample moved the estimate to \(clock.offsetMicros)")
-    // New minimum RTT with a 1000 µs different offset: EWMA moves 10 % of the way.
-    clock.addSample(t0: 30_000, t1: 30_050 + skew + 1_000, t2: 30_100)
-    check(clock.offsetMicros == Int64(skew) + 100 && clock.bestRoundTripMicros == 100, "EWMA step: \(clock.offsetMicros)")
-    // 10 s later the old minimum has aged out, so a 300 µs sample is the window's best.
+    // Equal minimum RTT with a 1000 µs different offset: EWMA moves 10 % of the way.
+    clock.addSample(t0: 30_000, t1: 30_100 + skew + 1_000, t2: 30_200)
+    check(clock.offsetMicros == Int64(skew) + 100 && clock.bestRoundTripMicros == 200, "EWMA step: \(clock.offsetMicros)")
+    // A much tighter sample (100 µs vs 200 µs) replaces the estimate outright: the first pong
+    // often queued behind a keyframe, and easing out of that at 10 % per second took minutes.
+    clock.addSample(t0: 40_000, t1: 40_050 + skew + 3_000, t2: 40_100)
+    check(clock.offsetMicros == Int64(skew) + 3_000 && clock.bestRoundTripMicros == 100, "tighter sample jump: \(clock.offsetMicros)")
+    // 10 s later the old minimum has aged out, so a 300 µs sample is the window's best and is
+    // eased in: 3000 + 10 % of (100 − 3000) = 2710.
     clock.addSample(t0: 10_100_000, t1: 10_100_150 + skew + 100, t2: 10_100_300)
-    check(clock.offsetMicros == Int64(skew) + 100 && clock.bestRoundTripMicros == 300, "window expiry: \(clock.offsetMicros)")
-    check(clock.remoteToLocal(5_000 + skew + 100) == 5_000 && clock.localToRemote(5_000) == 5_000 + skew + 100, "conversions")
+    check(clock.offsetMicros == Int64(skew) + 2_710 && clock.bestRoundTripMicros == 300, "window expiry: \(clock.offsetMicros)")
+    check(clock.remoteToLocal(5_000 + skew + 2_710) == 5_000 && clock.localToRemote(5_000) == 5_000 + skew + 2_710, "conversions")
     // Negative offset (remote behind) and a pong for a ping "from the future" (ignored).
     let behind = ClockSync()
     behind.addSample(t0: 5_000_000, t1: 1_000, t2: 5_000_100)

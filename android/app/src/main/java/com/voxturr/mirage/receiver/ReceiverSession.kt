@@ -146,6 +146,7 @@ class ReceiverSession(
                         averageLatencyMs = stats.roundTripMs,
                         decodeMsAverage = stats.decodeMs,
                         bytesReceived = (bytes - bytesAtLastReport).toInt(),
+                        audioDelayNeededMs = stats.audioDelayNeededMs.takeIf { it > 0 },
                     )
                     bytesAtLastReport = bytes
                     link.send(MessageType.STATS, payload = report.toJson())
