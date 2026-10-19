@@ -196,30 +196,33 @@ class VideoDecoder(
         if (!s.isValid) return
         val mime = if (hevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
         val info = Codecs.pickDecoder(mime)
-        var c: MediaCodec? = null
-        try {
-            c = if (info != null) MediaCodec.createByCodecName(info.name) else MediaCodec.createDecoderByType(mime)
+        // Attempts, best first. Exynos accepts an unbounded KEY_OPERATING_RATE at configure()
+        // and then fails start() with NO_MEMORY, because it sizes its resources from that rate —
+        // so ask for a realistic rate (twice the panel's top refresh), and if even that fails,
+        // retry with nothing but the essentials. Each attempt is configure *and* start.
+        val operatingRates = listOf(OPERATING_RATE, null)
+        for ((attempt, rate) in operatingRates.withIndex()) {
+            var c: MediaCodec? = null
             try {
-                configure(c, buildFormat(p, mime, info, withOperatingRate = true), s)
+                c = if (info != null) MediaCodec.createByCodecName(info.name) else MediaCodec.createDecoderByType(mime)
+                configure(c, buildFormat(p, mime, info, rate), s)
+                c.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT)
+                val started = c
+                queue.withLock {
+                    codec = started
+                    queue.reset(ready = true, requestKeyframe = requestKeyframe)
+                    started.start()
+                }
+                Log.i(TAG, "decoder ${c.name} started: ${p.codec} ${p.width}x${p.height} operatingRate=${rate ?: "default"}")
+                ensureHintSession()
+                return
             } catch (e: Exception) {
-                // Some codecs reject an unbounded operating rate; retry without it.
-                Log.w(TAG, "configure with operating rate failed, retrying", e)
-                c.reset()
-                configure(c, buildFormat(p, mime, info, withOperatingRate = false), s)
+                val last = attempt == operatingRates.lastIndex
+                if (last) Log.e(TAG, "could not start decoder", e)
+                else Log.w(TAG, "decoder start failed with operating rate $rate, retrying: ${e.message}")
+                queue.withLock { codec = null; queue.reset(ready = false, requestKeyframe = false) }
+                try { c?.release() } catch (_: Exception) {}
             }
-            c.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT)
-            val started = c
-            queue.withLock {
-                codec = started
-                queue.reset(ready = true, requestKeyframe = requestKeyframe)
-                started.start()
-            }
-            Log.i(TAG, "decoder ${c.name} started: ${p.codec} ${p.width}x${p.height}")
-            ensureHintSession()
-        } catch (e: Exception) {
-            Log.e(TAG, "could not start decoder", e)
-            queue.withLock { codec = null; queue.reset(ready = false, requestKeyframe = false) }
-            try { c?.release() } catch (_: Exception) {}
         }
     }
 
@@ -239,7 +242,7 @@ class VideoDecoder(
         try { c.release() } catch (_: Exception) {}
     }
 
-    private fun buildFormat(p: VideoParameterSets, mime: String, info: MediaCodecInfo?, withOperatingRate: Boolean): MediaFormat {
+    private fun buildFormat(p: VideoParameterSets, mime: String, info: MediaCodecInfo?, operatingRate: Int?): MediaFormat {
         val f = MediaFormat.createVideoFormat(mime, p.width, p.height)
         if (hevc) {
             f.setByteBuffer("csd-0", ByteBuffer.wrap(Nal.withStartCodes(p.parameterSets)))
@@ -255,7 +258,7 @@ class VideoDecoder(
             f.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         }
         f.setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime
-        if (withOperatingRate) f.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
+        if (operatingRate != null) f.setInteger(MediaFormat.KEY_OPERATING_RATE, operatingRate)
         return f
     }
 
@@ -293,6 +296,8 @@ class VideoDecoder(
 
     private companion object {
         const val TAG = "Mirage"
+        /** Twice the Tab S9 FE's 90 Hz: headroom to clear a burst, without asking for more than the hardware has. */
+        const val OPERATING_RATE = 180
         const val TARGET_WORK_NANOS = 8_000_000L // a frame should be through decode well within 8 ms
     }
 }

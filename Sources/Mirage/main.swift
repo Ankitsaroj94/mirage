@@ -21,6 +21,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         Log.app("Mirage launched")
+        connectFromCommandLine()
+    }
+
+    /// `Mirage --connect 192.168.1.17:42815` sends the screen straight to that address, the
+    /// same as "Connect by address…". Handy for scripts and for testing against a tablet.
+    private func connectFromCommandLine() {
+        let arguments = CommandLine.arguments
+        guard let index = arguments.firstIndex(of: "--connect"), index + 1 < arguments.count else { return }
+        let target = arguments[index + 1]
+        guard let colon = target.lastIndex(of: ":"),
+              let port = UInt16(target[target.index(after: colon)...]),
+              let display = DiscoveredDisplay.manual(host: String(target[..<colon]), port: port) else {
+            Log.app("--connect expects host:port, got \(target)")
+            return
+        }
+        Log.app("connecting to \(target) from the command line")
+        model.connect(to: display)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
