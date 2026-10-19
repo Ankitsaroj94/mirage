@@ -220,7 +220,7 @@ private struct SenderPane: View {
                     }
                     .pickerStyle(.segmented)
                     Toggle("Allow 120 Hz", isOn: $model.hostSettings.allow120Hz)
-                    Text("Only used when the display's panel runs at 120 Hz, like the Galaxy Tab S9 FE. Costs more bandwidth and battery.")
+                    Text("Only used when the display's panel runs at 120 Hz, like a Galaxy Tab S9 or S10 (the Tab S9 FE tops out at 90 Hz). Costs more bandwidth and battery.")
                         .font(.caption).foregroundColor(.secondary)
 
                     Toggle("Accept keyboard, trackpad and touch from the display", isOn: $model.hostSettings.acceptRemoteInput)
@@ -378,11 +378,11 @@ private struct SoundSettings: View {
                     Slider(value: Binding(
                         get: { Double(settings.audioPlayoutDelayMs) },
                         set: { settings.audioPlayoutDelayMs = Int($0) }),
-                           in: 40...150, step: 5)
+                           in: 40...250, step: 5)
                     Text("\(settings.audioPlayoutDelayMs) ms")
                         .monospacedDigit().frame(width: 70, alignment: .trailing)
                 }
-                Text("Both speakers hold the sound this long before playing. Raise it if the tablet crackles on busy Wi-Fi.")
+                Text("Both speakers hold the sound this long before playing. The minimum: if the tablet measures that its Wi-Fi needs more, both move up together automatically.")
                     .font(.caption).foregroundColor(.secondary)
 
                 HStack {

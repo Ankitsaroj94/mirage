@@ -57,11 +57,11 @@ ANDROID TABLET (optional)
       screen", pick the tablet, choose a Screen size (Crisp is sharpest)
       and press Connect.
 
-  Mac as a display for the tablet:
-      needs the Shizuku app on the tablet, started via Wireless debugging
-      (repeat after every reboot). On the Mac choose "Be a display"; on the
-      tablet choose "Send my screen", pick the Mac, and allow Mirage in
-      Shizuku when asked.
+  Mac as a display for the tablet (experimental):
+      turn on USB debugging on the tablet and connect it to the Mac once.
+      On the Mac choose "Be a display", then start the tablet's server over
+      adb (the command is in the README, "Mac as a display for Android").
+      Shizuku on the tablet is an optional alternative to adb.
 
   Sound: with macOS 14.2 or later the Mac's sound can play on the Mac and
   the tablet in sync (Send my screen > Sound). macOS asks for System Audio
