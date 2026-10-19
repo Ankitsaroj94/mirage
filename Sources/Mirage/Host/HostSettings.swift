@@ -38,3 +38,33 @@ enum AudioMode: String, Codable, CaseIterable {
     case tabletOnly   // muted here, plays on the client
     case both         // plays on both, in sync
 }
+
+// MARK: - Back-compatible decoding
+
+/// The synthesised decoder ignores property defaults and throws on any missing key, so a
+/// settings blob saved by v1 (no audio / scaling fields) would fail to load. Every field
+/// falls back to its default instead. Kept in an extension so the memberwise and `init()`
+/// initialisers still exist.
+extension HostSettings {
+    init(from decoder: Decoder) throws {
+        self.init()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+            ((try? c.decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback
+        }
+        preferHEVC = value(.preferHEVC, preferHEVC)
+        maxFPS = value(.maxFPS, maxFPS)
+        targetBitrateKbps = value(.targetBitrateKbps, targetBitrateKbps)
+        minimumBitrateKbps = value(.minimumBitrateKbps, minimumBitrateKbps)
+        adaptiveBitrate = value(.adaptiveBitrate, adaptiveBitrate)
+        prioritiseTextClarity = value(.prioritiseTextClarity, prioritiseTextClarity)
+        acceptRemoteInput = value(.acceptRemoteInput, acceptRemoteInput)
+        allowPeerToPeer = value(.allowPeerToPeer, allowPeerToPeer)
+        pairingCode = value(.pairingCode, pairingCode)
+        scalePreferences = value(.scalePreferences, scalePreferences)
+        audioMode = value(.audioMode, audioMode)
+        audioPlayoutDelayMs = value(.audioPlayoutDelayMs, audioPlayoutDelayMs)
+        audioSyncOffsetMs = value(.audioSyncOffsetMs, audioSyncOffsetMs)
+        allow120Hz = value(.allow120Hz, allow120Hz)
+    }
+}

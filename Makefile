@@ -13,7 +13,18 @@ ifeq ($(strip $(SIGN_ID)),)
 SIGN_ID := -
 endif
 
-.PHONY: all build universal bundle universal-bundle dmg icon run test clean install-remote help
+# Android app (android/). ANDROID_SERIAL picks the device when more than one is attached.
+ANDROID_DIR := android
+ANDROID_APK := $(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk
+GRADLE      := cd $(ANDROID_DIR) && ./gradlew
+# Gradle's installDebug (via adb) reads ANDROID_SERIAL from the environment, so pass it through
+# whether it was set in the shell or as `make android-install ANDROID_SERIAL=R52W...`.
+ifdef ANDROID_SERIAL
+export ANDROID_SERIAL
+endif
+
+.PHONY: all build universal bundle universal-bundle dmg icon run test clean install-remote help \
+        android android-install android-test
 
 all: bundle
 
@@ -22,9 +33,12 @@ help:
 	@echo "make universal-bundle   build arm64 + x86_64 (needed for the 2017 Intel Mac)"
 	@echo "make dmg        build a universal .dmg you can copy to the other Mac"
 	@echo "make run        build and launch"
-	@echo "make test       run the protocol, codec and virtual-display checks"
+	@echo "make test       run the protocol, codec and virtual-display checks (+ Android unit tests)"
 	@echo "make install-remote HOST=user@mac   copy straight to the other Mac over ssh"
 	@echo "make icon       regenerate the app icon from Tools/make-icon.swift"
+	@echo "make android    build the Android app (debug APK) into $(ANDROID_APK)"
+	@echo "make android-install   install it on the connected tablet (ANDROID_SERIAL=... to pick one)"
+	@echo "make android-test      run the Android unit tests"
 	@echo "make clean"
 
 build:
@@ -82,6 +96,20 @@ run: bundle
 
 test:
 	@bash Tests/run-tests.sh
+	@if [ -x $(ANDROID_DIR)/gradlew ]; then \
+	    printf "\n\033[1m── android unit tests ──\033[0m\n"; \
+	    $(MAKE) --no-print-directory android-test; \
+	fi
+
+android:
+	$(GRADLE) assembleDebug
+	@echo "built $(ANDROID_APK)"
+
+android-install:
+	$(GRADLE) installDebug
+
+android-test:
+	$(GRADLE) testDebugUnitTest
 
 install-remote: universal-bundle
 	@test -n "$(HOST)" || (echo "usage: make install-remote HOST=user@othermac" && exit 1)
