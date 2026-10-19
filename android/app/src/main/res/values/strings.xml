@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Mirage</string>
+
+    <string name="receiver_title">Mirage display</string>
+    <string name="receiver_channel">Display connection</string>
+    <string name="receiver_starting">Starting…</string>
+    <string name="receiver_waiting">Waiting for a Mac on %1$s:%2$d</string>
+    <string name="receiver_connected">Showing %1$s — tap to open</string>
+    <string name="receiver_stop">Stop</string>
+
+    <string name="menu_disconnect">Disconnect</string>
+    <string name="menu_show_stats">Show stats</string>
+    <string name="menu_hide_stats">Hide stats</string>
+    <string name="menu_resume">Resume</string>
+
+    <string name="home_display_title">Be a display</string>
+    <string name="home_display_body">Use this tablet as an extra screen for your Mac. Start it here, then pick this tablet in Mirage on the Mac.</string>
+    <string name="home_send_title">Send my screen</string>
+    <string name="home_send_body">Show a second Android desktop on your Mac and drive it with the Mac\'s keyboard and mouse.</string>
+    <string name="home_coming_soon">Coming soon</string>
+    <string name="home_start">Start</string>
+    <string name="home_stop">Stop</string>
+    <string name="home_open">Open</string>
+    <string name="home_show_display">Show display</string>
+    <string name="home_device_name">Device name</string>
+    <string name="home_pairing_code">Pairing code (optional)</string>
+    <string name="home_pairing_hint">If set, the Mac must enter the same code and the link is encrypted.</string>
+    <string name="home_scale">Screen size</string>
+    <string name="home_looks_like">Looks like %1$d × %2$d</string>
+    <string name="home_show_stats">Show stats overlay</string>
+    <string name="home_ctrl_cmd">Keyboard Ctrl acts as ⌘</string>
+    <string name="home_restart_hint">Changes apply the next time you start.</string>
+</resources>
