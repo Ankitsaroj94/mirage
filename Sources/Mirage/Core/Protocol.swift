@@ -25,8 +25,8 @@ enum MessageType: UInt8 {
     case stats           = 0x30   // client -> host, JSON ClientStats
     case requestKeyframe = 0x31   // client -> host, empty
     case frameAck        = 0x32   // client -> host, empty; echoes the frame's timestamp
-    case ping            = 0x40
-    case pong            = 0x41
+    case ping            = 0x40   // either direction, empty
+    case pong            = 0x41   // echoes the ping's timestamp; v2 payload: 8-byte LE responder clock
     case bye             = 0x50
     case keyExchange     = 0x60   // either direction, cleartext X25519 public key + HMAC
     case audioConfig     = 0x70   // host -> client, JSON AudioConfig (v2)
@@ -62,12 +62,32 @@ struct MessageHeader {
         self.timestampMicros = timestampMicros
     }
 
+    /// Strict: nil for a type this build does not know. The receive loop uses
+    /// `RawMessageHeader` instead, so there an unknown type is skipped rather than fatal.
+    init?(decoding data: Data) {
+        guard let raw = RawMessageHeader(decoding: data), let type = raw.type else { return nil }
+        self.init(type: type, flags: raw.flags, payloadLength: raw.payloadLength, timestampMicros: raw.timestampMicros)
+    }
+}
+
+/// The header exactly as it came off the wire, with the type left as a byte.
+///
+/// v1 decoded straight into `MessageType` and dropped the link on anything it did not
+/// recognise, which is why a v2 peer holds v2 types back from a v1 peer. From v2 on, an
+/// unknown type is read, opened (so the cipher counter stays in step) and discarded, so a
+/// later version can add messages without breaking this one.
+struct RawMessageHeader {
+    var rawType: UInt8
+    var flags: UInt8
+    var payloadLength: UInt32
+    var timestampMicros: UInt64
+
+    var type: MessageType? { MessageType(rawValue: rawType) }
+
     init?(decoding data: Data) {
         guard data.count >= MessageHeader.byteCount else { return nil }
-        let bytes = [UInt8](data)
-        guard let type = MessageType(rawValue: bytes[0]) else { return nil }
-        self.type = type
-        self.flags = bytes[1]
+        self.rawType = data[data.startIndex]
+        self.flags = data[data.startIndex + 1]
         self.payloadLength = data.readLE(at: 4)
         self.timestampMicros = data.readLE(at: 8)
     }
@@ -75,10 +95,16 @@ struct MessageHeader {
 
 // MARK: - Control payloads
 
-/// Describes the receiving Mac's panel. The host builds a virtual display that matches
-/// this exactly, which is what keeps the picture free of any resampling.
+/// Describes the receiving device's panel. For a Mac the host builds a virtual display that
+/// matches this exactly, which is what keeps the picture free of any resampling; for other
+/// platforms `DisplayGeometry` decides the size (spec/PROTOCOL.md §5).
+///
+/// Also the payload of `reconfigure`: the full, updated hello after a rotation or scale change.
 struct ClientHello: Codable {
-    static let currentVersion = 1
+    /// v2 adds the optional fields below, `reconfigure`, audio and the pong clock payload.
+    static let currentVersion = 2
+    /// Oldest peer a host still serves. v1 is every Mac build from before Android support.
+    static let oldestSupportedVersion = 1
 
     var protocolVersion: Int = ClientHello.currentVersion
     var deviceName: String
@@ -98,6 +124,23 @@ struct ClientHello: Codable {
     var supportsAudio: Bool? = nil
     var audioUDPPort: Int? = nil
     var orientation: String? = nil         // "landscape" | "portrait"
+
+    /// v2-only message types (`reconfigure`, `audioConfig`, `audioStop`) are only ever sent to
+    /// a peer for which this holds — a v1 peer drops the link on a type it does not know.
+    var speaksV2: Bool { protocolVersion >= 2 }
+
+    /// Nil and "macos" both mean a Mac: a v1 peer never sends the field.
+    var isMac: Bool { (platform ?? "macos") == "macos" }
+
+    /// The same panel as a v1 build would describe it, for a host that predates v2 and
+    /// rejects any other version number.
+    var downgradedToV1: ClientHello {
+        var hello = self
+        hello.protocolVersion = 1
+        hello.platform = nil; hello.physicalDPI = nil; hello.scalePreference = nil
+        hello.supportsAudio = nil; hello.audioUDPPort = nil; hello.orientation = nil
+        return hello
+    }
 }
 
 struct HostHelloAck: Codable {
@@ -116,6 +159,9 @@ struct HostHelloAck: Codable {
     // v2
     var platform: String? = nil
     var audioAvailable: Bool? = nil
+
+    /// Only a v2 host fills `platform`, so its absence identifies a v1 host.
+    var isFromV1Host: Bool { platform == nil }
 }
 
 enum VideoCodec: String, Codable {

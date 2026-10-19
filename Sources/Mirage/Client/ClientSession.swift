@@ -16,6 +16,9 @@ final class ClientSession: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var stats = SessionStats()
     @Published private(set) var warning: String?
+    /// TCP port this Mac is listening on while advertising. Ephemeral, so the UI shows it for
+    /// a host that has to connect by address (`DiscoveredDisplay.manual(host:port:)`).
+    @Published private(set) var listeningPort: UInt16?
 
     var settings: ClientSettings
 
@@ -37,6 +40,8 @@ final class ClientSession: ObservableObject {
     private let renderQueue = DispatchQueue(label: "com.voxturr.mirage.render", qos: .userInteractive)
     private let collector = StatsCollector()
     private nonisolated(unsafe) var bytesSinceReport = 0
+    /// Set once a v1 host has turned down our v2 hello and we have re-sent it as v1.
+    private var sentLegacyHello = false
 
     init(settings: ClientSettings) {
         self.settings = settings
@@ -57,10 +62,16 @@ final class ClientSession: ObservableObject {
             advertiser.onError = { [weak self] error in
                 Task { @MainActor in self?.state = .failed(error.localizedDescription) }
             }
+            advertiser.onListening = { [weak self] port in
+                Task { @MainActor in self?.listeningPort = port }
+            }
+            // This Mac plays no audio as a display (yet), so `audio` stays 0.
             try advertiser.start(displayName: settings.displayName,
                                  panel: panel,
                                  pairingCode: settings.pairingCode,
-                                 allowPeerToPeer: settings.allowPeerToPeer)
+                                 allowPeerToPeer: settings.allowPeerToPeer,
+                                 platform: "macos",
+                                 supportsAudio: false)
             state = .advertising
         } catch {
             state = .failed(error.localizedDescription)
@@ -75,6 +86,7 @@ final class ClientSession: ObservableObject {
         link?.send(.bye)
         link?.close(); link = nil
         advertiser.stop()
+        listeningPort = nil
         warning = nil
         if case .failed = state {} else { state = .idle }
     }
@@ -83,6 +95,7 @@ final class ClientSession: ObservableObject {
         // One host at a time. A second connection is refused rather than fighting for the screen.
         guard self.link == nil else { link.close(); return }
         self.link = link
+        sentLegacyHello = false
 
         link.onReady = { [weak self] in
             Task { @MainActor in self?.sendHello() }
@@ -127,9 +140,9 @@ final class ClientSession: ObservableObject {
         link.start()
     }
 
-    private func sendHello() {
+    private func makeHello() -> ClientHello {
         let panel = Self.currentPanel(preferNative: settings.useNativePanelResolution)
-        let hello = ClientHello(deviceName: settings.displayName,
+        var hello = ClientHello(deviceName: settings.displayName,
                                 pixelWidth: panel.pixelWidth,
                                 pixelHeight: panel.pixelHeight,
                                 pointWidth: panel.pointWidth,
@@ -138,7 +151,17 @@ final class ClientSession: ObservableObject {
                                 supportsHEVC: VideoRenderer.supportsHardwareHEVC,
                                 supportsH264: true,
                                 wantsInputForwarding: settings.forwardInput)
-        link?.sendJSON(.hello, hello)
+        // v2 fields. A Mac host still builds exactly the panel above for platform "macos";
+        // no scale preference and no audio from this side.
+        hello.platform = "macos"
+        hello.physicalDPI = panel.physicalDPI > 0 ? panel.physicalDPI : nil
+        hello.supportsAudio = false
+        hello.orientation = panel.pixelWidth >= panel.pixelHeight ? "landscape" : "portrait"
+        return hello
+    }
+
+    private func sendHello() {
+        link?.sendJSON(.hello, makeHello())
     }
 
     // MARK: Incoming messages
@@ -148,15 +171,32 @@ final class ClientSession: ObservableObject {
         case .helloAck:
             guard let ack = try? JSONDecoder().decode(HostHelloAck.self, from: payload) else { return }
             guard ack.accepted else {
+                // A v1 host rejects any version but 1 — and says so in a helloAck without the
+                // v2 `platform` field. Re-send the same panel as v1 once; the host keeps the
+                // link open after a rejection and serves the next hello.
+                if ack.isFromV1Host, !sentLegacyHello, ack.reason?.contains("Version mismatch") == true {
+                    sentLegacyHello = true
+                    Log.net("v1 host; re-sending hello as protocol v1")
+                    link?.sendJSON(.hello, makeHello().downgradedToV1)
+                    return
+                }
                 state = .failed(ack.reason ?? "The other Mac refused the connection.")
+                presenter?.close(); presenter = nil
+                inputForwarder?.stop(); inputForwarder = nil
                 link?.close(); link = nil
                 return
             }
             state = .connected(ack.hostName)
             warning = ack.isHiDPI ? nil
                 : "The virtual display did not take a Retina mode, so text will look soft. Try reconnecting."
-            presentFullScreen(ack: ack)
-            startTimers()
+            // A second helloAck on the same link is the host confirming a rebuilt display (a
+            // reconfigure): the window stays, and the renderer resets on the new parameter sets.
+            if presenter == nil {
+                presentFullScreen(ack: ack)
+                startTimers()
+            } else {
+                Log.video("host updated the stream: \(ack.pixelWidth)x\(ack.pixelHeight) @ \(ack.fps)")
+            }
 
         case .bye:
             presenter?.close(); presenter = nil
@@ -250,11 +290,27 @@ final class ClientSession: ObservableObject {
         if pixelHeight % 2 != 0 { pixelHeight -= 1 }
 
         let refresh = screen.maximumFramesPerSecond
+        let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
+            .map { CGDirectDisplayID($0.uint32Value) }
         return PanelDescription(pixelWidth: pixelWidth,
                                 pixelHeight: pixelHeight,
                                 pointWidth: pointWidth,
                                 pointHeight: pointHeight,
-                                refreshHz: refresh > 0 ? refresh : 60)
+                                refreshHz: refresh > 0 ? refresh : 60,
+                                physicalDPI: displayID.map(physicalDPI(of:)) ?? 0)
+    }
+
+    /// Native pixels per inch of a panel, 0 when the display does not report its size (some
+    /// projectors and TVs). Informative only: a Mac host sizes a Mac client by its framebuffer.
+    static func physicalDPI(of displayID: CGDirectDisplayID) -> Double {
+        let millimetres = CGDisplayScreenSize(displayID).width
+        guard millimetres > 0 else { return 0 }
+        // The current mode may be a scaled one, so take the widest mode's pixels: the panel's own.
+        let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
+        let modes = (CGDisplayCopyAllDisplayModes(displayID, options) as? [CGDisplayMode]) ?? []
+        let nativeWidth = modes.map(\.pixelWidth).max() ?? CGDisplayPixelsWide(displayID)
+        guard nativeWidth > 0 else { return 0 }
+        return (Double(nativeWidth) / (millimetres / 25.4)).rounded()
     }
 }
 

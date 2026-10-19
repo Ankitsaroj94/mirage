@@ -1,11 +1,15 @@
 #!/bin/bash
 #
-# Runs the three harnesses. None of them need Screen Recording permission.
+# Runs the harnesses. None of them need Screen Recording permission.
 #
-#   1. protocol  — framing, packed structs, encrypted + wrong-code paths over loopback
-#   2. codec     — 2880x1800 encode -> wire bytes -> decode, PSNR checked
-#   3. display   — the helper process actually creates a Retina virtual display
-#   4. latency   — end-to-end frame latency, including with the main thread jammed
+#   1. protocol    — framing, packed structs, encrypted + wrong-code paths over loopback,
+#                    and a heartbeat soak (an encrypted link must outlive its pings)
+#   2. protocol v2 — spec/vectors.json byte for byte, v1/v2 JSON compatibility, ClockSync,
+#                    discovery TXT, unknown message types on live links
+#   3. geometry    — DisplayGeometry table (Galaxy Tab S9 FE, rotation, scale modes, Macs)
+#   4. codec       — 2880x1800 encode -> wire bytes -> decode, PSNR checked
+#   5. display     — the helper process actually creates a Retina virtual display
+#   6. latency     — end-to-end frame latency, including with the main thread jammed
 #
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -17,28 +21,41 @@ FAILED=0
 step() { printf "\n\033[1m── %s ──\033[0m\n" "$1"; }
 check() { if [ "$1" -ne 0 ]; then echo "  FAILED"; FAILED=1; fi; }
 
-CORE="Sources/Mirage/Core/Protocol.swift Sources/Mirage/Core/PeerLink.swift Sources/Mirage/Core/SecureChannel.swift Sources/Mirage/Support/Log.swift"
+CORE="Sources/Mirage/Core/Protocol.swift Sources/Mirage/Core/PeerLink.swift Sources/Mirage/Core/SecureChannel.swift Sources/Mirage/Core/ClockSync.swift Sources/Mirage/Support/Log.swift"
 
-step "1/4  protocol"
+step "1/6  protocol"
 swiftc -O $CORE Tests/Harness/main.swift -o "$TMP/linktest" 2>&1 | grep -E "error:" && FAILED=1
-"$TMP/linktest";              check $?
-"$TMP/linktest" --psk;        check $?
+"$TMP/linktest";                    check $?
+"$TMP/linktest" --psk;              check $?
 "$TMP/linktest" --psk --wrong-code; check $?
+"$TMP/linktest" --soak;             check $?
+"$TMP/linktest" --psk --soak;       check $?
 
-step "2/4  codec"
+step "2/6  protocol v2 + spec/vectors.json"
+swiftc -O $CORE Sources/Mirage/Core/Discovery.swift \
+          Tests/ProtocolV2Harness/main.swift -o "$TMP/v2test" 2>&1 | grep -E "error:" && FAILED=1
+"$TMP/v2test" spec/vectors.json; check $?
+
+step "3/6  display geometry"
+swiftc -O Sources/Mirage/Core/Protocol.swift Sources/Mirage/Support/Log.swift \
+          Sources/Mirage/Host/HostSettings.swift Sources/Mirage/Host/DisplayGeometry.swift \
+          Tests/GeometryHarness/main.swift -o "$TMP/geotest" 2>&1 | grep -E "error:" && FAILED=1
+"$TMP/geotest"; check $?
+
+step "4/6  codec"
 swiftc -O Sources/Mirage/Core/Protocol.swift Sources/Mirage/Support/Log.swift \
           Sources/Mirage/Host/VideoEncoder.swift Sources/Mirage/Client/VideoRenderer.swift \
           Tests/CodecHarness/main.swift -o "$TMP/codectest" 2>&1 | grep -E "error:" && FAILED=1
 "$TMP/codectest"; check $?
 
-step "3/4  virtual display (via helper process)"
+step "5/6  virtual display (via helper process)"
 swift build -c release >/dev/null 2>&1
 BIN=$(swift build -c release --show-bin-path)
 MIRAGE_HELPER="$BIN/MirageDisplayHelper" swiftc -O \
   Sources/Mirage/Support/Log.swift Tests/DisplayHarness/main.swift -o "$TMP/displaytest" 2>&1 | grep -E "error:" && FAILED=1
 MIRAGE_HELPER="$BIN/MirageDisplayHelper" "$TMP/displaytest"; check $?
 
-step "4/4  end-to-end latency"
+step "6/6  end-to-end latency"
 swiftc -O $CORE Sources/Mirage/Support/Stats.swift \
           Sources/Mirage/Host/VideoEncoder.swift Sources/Mirage/Host/FramePump.swift \
           Sources/Mirage/Host/HostSettings.swift Sources/Mirage/Client/VideoRenderer.swift \
