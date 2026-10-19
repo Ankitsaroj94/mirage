@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+
+    <application
+        android:label="Mirage"
+        android:icon="@android:drawable/ic_menu_slideshow"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- AGENT-5: receiver activity/service entries go below this line -->
+        <!-- Full-screen extended display. Rotation is handled in-process (→ reconfigure), never recreated. -->
+        <activity
+            android:name=".receiver.ReceiverActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:screenOrientation="fullSensor"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:theme="@style/Theme.Mirage.Receiver" />
+
+        <!-- "Be a display": PeerListener + advertiser + session; connectedDevice FGS
+             (satisfied by CHANGE_WIFI_MULTICAST_STATE above). -->
+        <service
+            android:name=".receiver.ReceiverService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+        <!-- AGENT-5: end -->
+
+        <!-- AGENT-6: host activity/service entries go below this line -->
+        <!-- "Send my screen". Started by the home screen; the privileged part runs as shell
+             (ServerMain over adb, or the Shizuku UserService), so nothing else is declared. -->
+        <activity
+            android:name=".host.HostActivity"
+            android:exported="false"
+            android:label="Send my screen"
+            android:windowSoftInputMode="adjustResize" />
+
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+    </application>
+</manifest>

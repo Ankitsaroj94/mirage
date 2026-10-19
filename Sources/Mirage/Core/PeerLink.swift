@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import CryptoKit
 
 /// Builds the TCP parameters both ends use.
 ///
@@ -50,14 +51,25 @@ final class PeerLink {
     typealias MessageHandler = (MessageType, UInt8, UInt64, Data) -> Void
 
     let connection: NWConnection
+    /// Only ever sees types this build knows. Ping, pong and keyExchange are handled here;
+    /// anything newer than this build is opened and dropped.
     var onMessage: MessageHandler?
     /// Fires once the link is usable for application messages — after the key exchange
     /// when a pairing code is in use, immediately otherwise.
     var onReady: (() -> Void)?
     var onFailure: ((Error?) -> Void)?
 
+    /// Peer clock relative to ours, fed by v2 pongs. Audio playout and cross-device latency
+    /// stats read it; a v1 peer never feeds it, so `hasEstimate` stays false.
+    let clock = ClockSync()
+
     private let queue: DispatchQueue
     private let lock = NSLock()
+    /// Held across sealing *and* handing bytes to the connection. AES-GCM nonces come from a
+    /// per-direction counter, so the peer can only open messages in the order they were
+    /// sealed; without this a pong sealed on the link queue could overtake a frame sealed on
+    /// the encoder queue and kill the link.
+    private let sendLock = NSLock()
     private var _pendingBytes = 0
     private var started = false
     private var closed = false
@@ -84,6 +96,21 @@ final class PeerLink {
     var pendingBytes: Int {
         lock.lock(); defer { lock.unlock() }
         return _pendingBytes
+    }
+
+    /// The AES-GCM key of an encrypted link, nil when no pairing code is in use (or before
+    /// the key exchange lands). The UDP audio flow encrypts with it.
+    var sessionKey: SymmetricKey? {
+        lock.lock(); defer { lock.unlock() }
+        return channel?.sessionKey
+    }
+
+    /// The peer's address as the connection actually reached it — a resolved IP even when
+    /// the link was opened from a Bonjour service. Side channels (UDP audio) go here.
+    var remoteHost: NWEndpoint.Host? {
+        if case .hostPort(let host, _) = connection.currentPath?.remoteEndpoint { return host }
+        if case .hostPort(let host, _) = connection.endpoint { return host }
+        return nil
     }
 
     init(connection: NWConnection, queue: DispatchQueue, role: SecureChannel.Role, pairingCode: String?) {
@@ -133,12 +160,18 @@ final class PeerLink {
         connection.cancel()
     }
 
+    /// False once the link has failed or been closed; sends are dropped from then on.
+    var isOpen: Bool { !closed }
+
     private func startHeartbeat() {
         heartbeatTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in
             guard let self, !self.closed else { return }
+            // A ping sent in the clear while the key exchange is still in flight would reach
+            // a peer that already holds the key, fail to open there, and drop the link.
+            if self.handshake != nil, self.sessionKey == nil { return }
             self.transmit(.ping, flags: 0, payload: Data(), timestampMicros: MonotonicClock.micros())
         }
         timer.resume()
@@ -148,6 +181,8 @@ final class PeerLink {
     private func fail(_ error: Error?) {
         guard !closed else { return }
         closed = true
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
         onFailure?(error)
     }
 
@@ -175,20 +210,18 @@ final class PeerLink {
         send(type, payload: data)
     }
 
-    private func transmit(_ type: MessageType, flags: UInt8, payload: Data, timestampMicros: UInt64) {
+    /// Header + body exactly as it goes on the wire. With a channel the body is sealed and the
+    /// header — sent in the clear — is authenticated as associated data, so a tampered length
+    /// or frame flag fails the GCM tag rather than being trusted. The AAD is the real header,
+    /// i.e. with `payloadLength` = plaintext + 16. spec/PROTOCOL.md §6.
+    static func frame(_ type: MessageType, flags: UInt8, payload: Data, timestampMicros: UInt64,
+                      sealingWith channel: SecureChannel?) throws -> Data {
         var body = payload
-
-        // The header is sent in the clear but authenticated as associated data, so a
-        // tampered length or frame flag fails the GCM tag rather than being trusted.
         if type != .keyExchange, let channel {
             let provisional = MessageHeader(type: type, flags: flags,
                                             payloadLength: UInt32(payload.count + 16),
                                             timestampMicros: timestampMicros).encoded()
-            guard let sealed = try? channel.seal(payload, authenticating: provisional) else {
-                fail(SecureChannel.Failure.decryptionFailed)
-                return
-            }
-            body = sealed
+            body = try channel.seal(payload, authenticating: provisional)
         }
 
         let header = MessageHeader(type: type, flags: flags,
@@ -198,6 +231,22 @@ final class PeerLink {
         out.reserveCapacity(MessageHeader.byteCount + body.count)
         out.append(header.encoded())
         out.append(body)
+        return out
+    }
+
+    private func transmit(_ type: MessageType, flags: UInt8, payload: Data, timestampMicros: UInt64) {
+        sendLock.lock()
+        let ok = transmitLocked(type, flags: flags, payload: payload, timestampMicros: timestampMicros)
+        sendLock.unlock()
+        if !ok { fail(SecureChannel.Failure.decryptionFailed) }
+    }
+
+    /// Caller holds `sendLock`. Seals and enqueues in one step so wire order == counter order.
+    private func transmitLocked(_ type: MessageType, flags: UInt8, payload: Data, timestampMicros: UInt64) -> Bool {
+        guard let out = try? Self.frame(type, flags: flags, payload: payload,
+                                        timestampMicros: timestampMicros, sealingWith: channel) else {
+            return false
+        }
 
         lock.lock(); _pendingBytes += out.count; lock.unlock()
         let sentCount = out.count
@@ -207,6 +256,7 @@ final class PeerLink {
             self.lock.lock(); self._pendingBytes -= sentCount; self.lock.unlock()
             if let error { self.fail(error) }
         })
+        return true
     }
 
     // MARK: Receiving
@@ -216,7 +266,7 @@ final class PeerLink {
                            maximumLength: MessageHeader.byteCount) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             if let error { self.fail(error); return }
-            guard let data, let header = MessageHeader(decoding: data) else {
+            guard let data, let header = RawMessageHeader(decoding: data) else {
                 if isComplete { self.fail(nil) }
                 return
             }
@@ -229,7 +279,7 @@ final class PeerLink {
         }
     }
 
-    private func receivePayload(header: MessageHeader, headerBytes: Data, accumulated: Data? = nil) {
+    private func receivePayload(header: RawMessageHeader, headerBytes: Data, accumulated: Data? = nil) {
         // Reserve the whole frame up front. A keyframe arrives in many chunks, and growing
         // the buffer per chunk turned reassembly into repeated reallocation and copying.
         var accumulated = accumulated ?? {
@@ -255,29 +305,16 @@ final class PeerLink {
         }
     }
 
-    private func deliver(header: MessageHeader, headerBytes: Data, payload: Data) {
+    private func deliver(header: RawMessageHeader, headerBytes: Data, payload: Data) {
         if header.type == .keyExchange {
             completeHandshake(with: payload)
             return
         }
 
-        // Heartbeat never reaches the session layer. Replying inline means the peer's
-        // measurement is of the network, not of our main thread's queue depth.
-        switch header.type {
-        case .ping:
-            transmit(.pong, flags: 0, payload: Data(), timestampMicros: header.timestampMicros)
-            return
-        case .pong:
-            let sample = Double(MonotonicClock.micros() &- header.timestampMicros) / 1000.0
-            lock.lock()
-            // Light smoothing so a single scheduling hiccup does not dominate the readout.
-            _roundTripMs = _roundTripMs == 0 ? sample : _roundTripMs * 0.8 + sample * 0.2
-            lock.unlock()
-            return
-        default:
-            break
-        }
-
+        // Every other message is opened *before* it is looked at — ping, pong and types this
+        // build does not know included. The sender sealed each of them with the next counter
+        // value, so skipping one here would leave every later nonce off by one. (v1 answered
+        // ping/pong first and desynced encrypted links at the first heartbeat.)
         var body = payload
         if let channel {
             do {
@@ -291,24 +328,56 @@ final class PeerLink {
             fail(SecureChannel.Failure.malformedHandshake)
             return
         }
-        onMessage?(header.type, header.flags, header.timestampMicros, body)
+
+        guard let type = header.type else {
+            // A newer peer's message type. Ignoring it is the whole compatibility contract.
+            return
+        }
+
+        // Heartbeat never reaches the session layer. Replying inline means the peer's
+        // measurement is of the network, not of our main thread's queue depth.
+        switch type {
+        case .ping:
+            // v2 pong carries our clock; a v1 peer reads past the payload and ignores it.
+            transmit(.pong, flags: 0, payload: ClockSync.pongPayload(), timestampMicros: header.timestampMicros)
+        case .pong:
+            let now = MonotonicClock.micros()
+            let sample = Double(now &- header.timestampMicros) / 1000.0
+            lock.lock()
+            // Light smoothing so a single scheduling hiccup does not dominate the readout.
+            _roundTripMs = _roundTripMs == 0 ? sample : _roundTripMs * 0.8 + sample * 0.2
+            lock.unlock()
+            if let remote = ClockSync.remoteClock(fromPong: body) {
+                clock.addSample(t0: header.timestampMicros, t1: remote, t2: now)
+            }
+        default:
+            onMessage?(type, header.flags, header.timestampMicros, body)
+        }
     }
 
     private func completeHandshake(with peerMessage: Data) {
         guard let handshake, channel == nil else { return }
         do {
             let established = try handshake.complete(with: peerMessage)
+
+            // Install the key and flush what queued up behind it as one step under `sendLock`:
+            // a `send` that sees the channel early just waits here, so nothing overtakes the
+            // queued messages and the seal counter matches wire order.
+            sendLock.lock()
             lock.lock()
             channel = established
             let queued = outbox
             outbox.removeAll()
             lock.unlock()
-
-            onReady?()
-            for (type, flags, payload, timestamp) in queued {
-                transmit(type, flags: flags, payload: payload, timestampMicros: timestamp)
+            var flushed = true
+            for (type, flags, payload, timestamp) in queued where flushed {
+                flushed = transmitLocked(type, flags: flags, payload: payload, timestampMicros: timestamp)
             }
+            sendLock.unlock()
+            guard flushed else { fail(SecureChannel.Failure.decryptionFailed); return }
+
             Log.net("encrypted link established")
+            onReady?()
         } catch {
             Log.net("key exchange failed: \(error.localizedDescription)")
             fail(error)

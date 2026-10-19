@@ -45,8 +45,14 @@ struct SecureChannel {
         let codeSecret: SymmetricKey
 
         init(role: Role, pairingCode: String) {
+            self.init(role: role, pairingCode: pairingCode, privateKey: Curve25519.KeyAgreement.PrivateKey())
+        }
+
+        /// Fixed-key variant, for reproducing spec/vectors.json. Never use it on a real link:
+        /// the ephemeral key is what gives a recorded session forward secrecy.
+        init(role: Role, pairingCode: String, privateKey: Curve25519.KeyAgreement.PrivateKey) {
             self.role = role
-            self.privateKey = Curve25519.KeyAgreement.PrivateKey()
+            self.privateKey = privateKey
             self.codeSecret = SymmetricKey(data: SHA256.hash(data: Data(("mirage.pairing.v1:" + pairingCode).utf8)))
         }
 
@@ -97,6 +103,10 @@ struct SecureChannel {
         self.key = key
         self.role = role
     }
+
+    /// The HKDF output both sides derived. The UDP audio flow reuses it with nonce direction
+    /// byte 2 (spec/PROTOCOL.md §7), so its nonces can never collide with the TCP link's.
+    var sessionKey: SymmetricKey { key }
 
     /// Nonce layout: one byte of direction, three zero bytes, then an eight-byte counter.
     /// Each direction has its own counter and the key is per-session, so a nonce is never

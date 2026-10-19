@@ -45,3 +45,27 @@ NOTES
 
   Optional: turning on "Accept keyboard and trackpad from the other Mac"
   needs Accessibility permission on the main Mac.
+
+
+ANDROID TABLET (optional)
+
+  Install the Mirage APK on the tablet (copy it over and open it in My Files,
+  allowing "Install unknown apps" when asked).
+
+  Tablet as a display for this Mac:
+      on the tablet choose "Be a display"; on the Mac choose "Send my
+      screen", pick the tablet, choose a Screen size (Crisp is sharpest)
+      and press Connect.
+
+  Mac as a display for the tablet (experimental):
+      turn on USB debugging on the tablet and connect it to the Mac once.
+      On the Mac choose "Be a display", then start the tablet's server over
+      adb (the command is in the README, "Mac as a display for Android").
+      Shizuku on the tablet is an optional alternative to adb.
+
+  Sound: with macOS 14.2 or later the Mac's sound can play on the Mac and
+  the tablet in sync (Send my screen > Sound). macOS asks for System Audio
+  Recording the first time.
+
+  If the tablet or Mac never appears in the list, use "Connect by address…"
+  and type the address and port shown on the receiving side.

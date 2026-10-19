@@ -12,10 +12,28 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     struct Configuration {
         var displayID: CGDirectDisplayID
+        /// Backing-store size of the display being captured.
         var pixelWidth: Int
         var pixelHeight: Int
+        /// Size of the frames handed out — the encoder's size. Equal to the display's size
+        /// except for a "more space"-style plan (see `DisplayGeometry`).
+        var streamWidth: Int
+        var streamHeight: Int
         var fps: Int
         var showsCursor: Bool
+
+        init(displayID: CGDirectDisplayID, pixelWidth: Int, pixelHeight: Int,
+             streamWidth: Int? = nil, streamHeight: Int? = nil, fps: Int, showsCursor: Bool) {
+            self.displayID = displayID
+            self.pixelWidth = pixelWidth
+            self.pixelHeight = pixelHeight
+            self.streamWidth = streamWidth ?? pixelWidth
+            self.streamHeight = streamHeight ?? pixelHeight
+            self.fps = fps
+            self.showsCursor = showsCursor
+        }
+
+        var scalesToFit: Bool { streamWidth != pixelWidth || streamHeight != pixelHeight }
     }
 
     var onFrame: ((CVPixelBuffer, UInt64) -> Void)?
@@ -60,16 +78,18 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let streamConfig = SCStreamConfiguration()
 
         // Capture at the exact backing-store size of the virtual display. Any mismatch here
-        // would introduce a resample, which is the fastest way to make text look fuzzy.
-        streamConfig.width  = configuration.pixelWidth
-        streamConfig.height = configuration.pixelHeight
+        // would introduce a resample, which is the fastest way to make text look fuzzy —
+        // so it only happens when the plan asks for it (a scaled "more space" mode), and
+        // then on the GPU inside ScreenCaptureKit, never on the CPU.
+        streamConfig.width  = configuration.streamWidth
+        streamConfig.height = configuration.streamHeight
 
         streamConfig.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         streamConfig.colorSpaceName = CGColorSpace.sRGB
         streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(configuration.fps))
         streamConfig.queueDepth = 6
         streamConfig.showsCursor = configuration.showsCursor
-        streamConfig.scalesToFit = false
+        streamConfig.scalesToFit = configuration.scalesToFit
         streamConfig.capturesAudio = false
 
         if #available(macOS 14.0, *) {
@@ -82,7 +102,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         try await stream.startCapture()
         self.stream = stream
 
-        Log.video("capturing display \(configuration.displayID) at \(configuration.pixelWidth)x\(configuration.pixelHeight)")
+        Log.video("capturing display \(configuration.displayID) at \(configuration.pixelWidth)x\(configuration.pixelHeight)"
+                  + (configuration.scalesToFit ? " -> \(configuration.streamWidth)x\(configuration.streamHeight) (scaled)" : ""))
     }
 
     func stop() async {

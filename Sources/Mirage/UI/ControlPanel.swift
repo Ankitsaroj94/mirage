@@ -8,8 +8,8 @@ enum Role: String, CaseIterable, Identifiable {
 
     var explanation: String {
         switch self {
-        case .send:    return "Creates an extra display on this Mac and streams it to another Mac."
-        case .receive: return "Offers this Mac's screen to another Mac on the network."
+        case .send:    return "Creates an extra display on this Mac and streams it to another Mac or an Android tablet."
+        case .receive: return "Offers this Mac's screen to another Mac or an Android tablet on the network."
         }
     }
 }
@@ -23,13 +23,18 @@ final class AppModel: ObservableObject {
     @Published var pairingCode: String = ""
     @Published var usePairingCode = false
     @Published var screenRecordingGranted = false
+    @Published var showingConnectByAddress = false
 
     let host: HostSession
     let client: ClientSession
     private let browser = DisplayBrowser()
 
+    /// Host settings survive relaunches so per-tablet screen sizes are remembered by name.
+    private static let hostSettingsKey = "hostSettings"
+
     init() {
-        let hostSettings = HostSettings()
+        let hostSettings = UserDefaults.standard.data(forKey: Self.hostSettingsKey)
+            .flatMap { try? JSONDecoder().decode(HostSettings.self, from: $0) } ?? HostSettings()
         let clientSettings = ClientSettings()
         self.hostSettings = hostSettings
         self.clientSettings = clientSettings
@@ -52,10 +57,24 @@ final class AppModel: ObservableObject {
         var h = hostSettings
         h.pairingCode = usePairingCode ? pairingCode : nil
         host.settings = h
+        if let data = try? JSONEncoder().encode(hostSettings) {
+            UserDefaults.standard.set(data, forKey: Self.hostSettingsKey)
+        }
 
         var c = clientSettings
         c.pairingCode = usePairingCode ? pairingCode : nil
         client.settings = c
+    }
+
+    func connect(to display: DiscoveredDisplay) {
+        applySettings()
+        host.connect(to: display)
+    }
+
+    /// Per-device screen size for Android tablets. Crisp unless the user picked otherwise.
+    func scalePreference(for display: DiscoveredDisplay) -> Binding<ScalePreference> {
+        Binding(get: { self.hostSettings.scalePreferences[display.name] ?? .crisp },
+                set: { self.hostSettings.scalePreferences[display.name] = $0 })
     }
 
     func refreshPermissions() {
@@ -137,34 +156,49 @@ private struct SenderPane: View {
             statusRow
 
             GroupBox("Available displays") {
-                if model.discovered.isEmpty {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Looking for another Mac running Mirage…")
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(6)
-                } else {
-                    VStack(spacing: 6) {
+                VStack(spacing: 6) {
+                    if model.discovered.isEmpty {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Looking for a Mac or Android tablet running Mirage…")
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(2)
+                    } else {
                         ForEach(model.discovered) { display in
                             DiscoveredRow(display: display,
+                                          scale: display.isAndroid ? model.scalePreference(for: display) : nil,
                                           isBusy: isConnecting(display),
                                           isConnected: isConnected(display)) {
-                                model.applySettings()
-                                model.host.connect(to: display)
+                                model.connect(to: display)
                             } disconnect: {
                                 model.host.disconnect()
                             }
                         }
                     }
-                    .padding(4)
+                    HStack {
+                        Spacer()
+                        Button("Connect by address…") { model.showingConnectByAddress = true }
+                            .controlSize(.small)
+                    }
+                }
+                .padding(4)
+            }
+            .sheet(isPresented: $model.showingConnectByAddress) {
+                ConnectByAddressSheet { host, port in
+                    model.showingConnectByAddress = false
+                    if let display = DiscoveredDisplay.manual(host: host, port: port) {
+                        model.connect(to: display)
+                    }
+                } cancel: {
+                    model.showingConnectByAddress = false
                 }
             }
 
             GroupBox("Quality") {
                 VStack(alignment: .leading, spacing: 10) {
-                    Toggle("Prefer HEVC when both Macs support it", isOn: $model.hostSettings.preferHEVC)
+                    Toggle("Prefer HEVC when both sides support it", isOn: $model.hostSettings.preferHEVC)
                     Toggle("Keep text sharp under load", isOn: $model.hostSettings.prioritiseTextClarity)
                     Text("Caps the encoder's quantiser, so a busy moment costs frame rate instead of legibility.")
                         .font(.caption).foregroundColor(.secondary)
@@ -185,8 +219,11 @@ private struct SenderPane: View {
                         Text("60 fps").tag(60)
                     }
                     .pickerStyle(.segmented)
+                    Toggle("Allow 120 Hz", isOn: $model.hostSettings.allow120Hz)
+                    Text("Only used when the display's panel runs at 120 Hz, like a Galaxy Tab S9 or S10 (the Tab S9 FE tops out at 90 Hz). Costs more bandwidth and battery.")
+                        .font(.caption).foregroundColor(.secondary)
 
-                    Toggle("Accept keyboard and trackpad from the other Mac", isOn: $model.hostSettings.acceptRemoteInput)
+                    Toggle("Accept keyboard, trackpad and touch from the display", isOn: $model.hostSettings.acceptRemoteInput)
                     if model.hostSettings.acceptRemoteInput && !InputInjector.isPermitted {
                         HStack {
                             Text("Needs Accessibility permission.")
@@ -197,6 +234,11 @@ private struct SenderPane: View {
                     }
                 }
                 .padding(6)
+            }
+
+            GroupBox("Sound") {
+                SoundSettings(settings: $model.hostSettings)
+                    .padding(6)
             }
             .onChange(of: model.hostSettings) { _ in model.applySettings() }
         }
@@ -242,38 +284,167 @@ private struct SenderPane: View {
 
 private struct DiscoveredRow: View {
     let display: DiscoveredDisplay
+    /// Only Android tablets get a screen-size choice; a Mac always gets its exact panel.
+    let scale: Binding<ScalePreference>?
     let isBusy: Bool
     let isConnected: Bool
     let connect: () -> Void
     let disconnect: () -> Void
 
     var body: some View {
-        HStack {
-            Image(systemName: "display")
-                .font(.title2)
-                .foregroundColor(.accentColor)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
-                    Text(display.name).fontWeight(.medium)
-                    if display.requiresPairingCode {
-                        Image(systemName: "lock.fill").font(.caption2).foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: display.isAndroid ? "ipad.landscape" : "laptopcomputer")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
+                    .frame(width: 32)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text(display.name).fontWeight(.medium)
+                        if display.isAndroid {
+                            Text("Android")
+                                .font(.caption2).fontWeight(.medium)
+                                .foregroundColor(.green)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Color.green.opacity(0.15))
+                                .cornerRadius(4)
+                        }
+                        if display.requiresPairingCode {
+                            Image(systemName: "lock.fill").font(.caption2).foregroundColor(.secondary)
+                        }
+                    }
+                    if display.pixelWidth > 0 {
+                        Text(display.isAndroid ? display.resolutionSummary
+                                               : "\(display.resolutionSummary) · \(display.scaledSummary)")
+                            .font(.caption).foregroundColor(.secondary)
                     }
                 }
-                if display.pixelWidth > 0 {
-                    Text("\(display.resolutionSummary) · \(display.scaledSummary)")
-                        .font(.caption).foregroundColor(.secondary)
+                Spacer()
+                if isConnected {
+                    Button("Stop", action: disconnect)
+                } else if isBusy {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Connect", action: connect)
                 }
             }
-            Spacer()
-            if isConnected {
-                Button("Stop", action: disconnect)
-            } else if isBusy {
-                ProgressView().controlSize(.small)
-            } else {
-                Button("Connect", action: connect)
+
+            if let scale {
+                HStack {
+                    Picker("Screen size", selection: scale) {
+                        ForEach(ScalePreference.allCases, id: \.self) { Text(ScaleHint.title($0)).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                    if display.pixelWidth > 0 {
+                        let pt = ScaleHint.looksLike(pixelWidth: display.pixelWidth,
+                                                     pixelHeight: display.pixelHeight,
+                                                     preference: scale.wrappedValue)
+                        Text("looks like \(pt.width)×\(pt.height)")
+                            .font(.caption).foregroundColor(.secondary).monospacedDigit()
+                    }
+                }
+                .font(.callout)
+                .padding(.leading, 40)
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// "Play Mac sound on" plus its two timing sliders.
+private struct SoundSettings: View {
+    @Binding var settings: HostSettings
+
+    private var supported: Bool { AudioStreamer.isSupported }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Play Mac sound on", selection: $settings.audioMode) {
+                Text("Mac + tablet, in sync").tag(AudioMode.both)
+                Text("Tablet only").tag(AudioMode.tabletOnly)
+                Text("This Mac only").tag(AudioMode.off)
+            }
+            .disabled(!supported)
+
+            Text(supported
+                 ? "Applies to Android tablets. macOS asks for System Audio Recording the first time."
+                 : "Sending sound needs macOS 14.2 or later, so it stays on this Mac.")
+                .font(.caption).foregroundColor(.secondary)
+
+            Group {
+                HStack {
+                    Text("Delay")
+                    Slider(value: Binding(
+                        get: { Double(settings.audioPlayoutDelayMs) },
+                        set: { settings.audioPlayoutDelayMs = Int($0) }),
+                           in: 40...250, step: 5)
+                    Text("\(settings.audioPlayoutDelayMs) ms")
+                        .monospacedDigit().frame(width: 70, alignment: .trailing)
+                }
+                Text("Both speakers hold the sound this long before playing. The minimum: if the tablet measures that its Wi-Fi needs more, both move up together automatically.")
+                    .font(.caption).foregroundColor(.secondary)
+
+                HStack {
+                    Text("Sync")
+                    Slider(value: Binding(
+                        get: { Double(settings.audioSyncOffsetMs) },
+                        set: { settings.audioSyncOffsetMs = Int($0) }),
+                           in: -50...50, step: 1)
+                    Text(String(format: "%+d ms", settings.audioSyncOffsetMs))
+                        .monospacedDigit().frame(width: 70, alignment: .trailing)
+                }
+                .disabled(settings.audioMode != .both)
+                Text("Nudges this Mac's speakers against the tablet's. Positive plays the Mac later.")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            .disabled(!supported || settings.audioMode == .off)
+        }
+    }
+}
+
+/// Host and port typed by hand, for networks that filter Bonjour between clients.
+private struct ConnectByAddressSheet: View {
+    let connect: (String, UInt16) -> Void
+    let cancel: () -> Void
+
+    @State private var host = ""
+    @State private var port = ""
+
+    private var trimmedHost: String { host.trimmingCharacters(in: .whitespaces) }
+    private var parsedPort: UInt16? {
+        guard let value = UInt16(port.trimmingCharacters(in: .whitespaces)), value > 0 else { return nil }
+        return value
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Connect by address").font(.headline)
+            Text("For when the display never shows up in the list. Its address and port are shown on the display under “Be a display”.")
+                .font(.caption).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Text("Address").frame(width: 60, alignment: .leading)
+                TextField("192.168.1.20", text: $host)
+            }
+            HStack {
+                Text("Port").frame(width: 60, alignment: .leading)
+                TextField("e.g. 51234", text: $port).frame(width: 100)
+                Spacer()
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Connect") {
+                    if let parsedPort { connect(trimmedHost, parsedPort) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(trimmedHost.isEmpty || parsedPort == nil)
+            }
+        }
+        .padding(16)
+        .frame(width: 340)
     }
 }
 
@@ -299,7 +470,10 @@ private struct ReceiverPane: View {
                     LabeledRow("Appears as", "\(panel.pointWidth) × \(panel.pointHeight) points")
                     LabeledRow("Refresh", "\(panel.refreshHz) Hz")
                     LabeledRow("HEVC decode", VideoRenderer.supportsHardwareHEVC ? "hardware" : "software only")
-                    Text("The other Mac builds a virtual display with exactly these numbers, so the picture is never scaled.")
+                    if let port = client.listeningPort {
+                        LabeledRow("Address", connectAddress(port: port))
+                    }
+                    Text("The sending device builds a virtual display with exactly these numbers, so the picture is never scaled.")
                         .font(.caption).foregroundColor(.secondary).padding(.top, 2)
                 }
                 .padding(6)
@@ -311,7 +485,7 @@ private struct ReceiverPane: View {
                         Text("Name")
                         TextField("Mac", text: $model.clientSettings.displayName)
                     }
-                    Toggle("Send my keyboard and trackpad to the other Mac", isOn: $model.clientSettings.forwardInput)
+                    Toggle("Send my keyboard and trackpad to the sending device", isOn: $model.clientSettings.forwardInput)
                     Toggle("Use the panel's native resolution instead of the current scaled one",
                            isOn: $model.clientSettings.useNativePanelResolution)
                 }
@@ -343,14 +517,28 @@ private struct ReceiverPane: View {
                 EmptyView()
             case .advertising:
                 CalloutBox(kind: .info,
-                           title: "Waiting for the other Mac",
-                           message: "Open Mirage on your other Mac, choose “Send my screen”, and pick \(model.clientSettings.displayName).") { EmptyView() }
+                           title: "Waiting for the other device",
+                           message: waitingMessage) { EmptyView() }
             case .connected(let name):
                 CalloutBox(kind: .success, title: "Connected to \(name)", message: client.warning) { EmptyView() }
             case .failed(let reason):
                 CalloutBox(kind: .warning, title: "Stopped", message: reason) { EmptyView() }
             }
         }
+    }
+
+    private var waitingMessage: String {
+        var text = "Open Mirage on your other Mac, choose “Send my screen”, and pick \(model.clientSettings.displayName). Android tablets can also send their screen here."
+        if let port = client.listeningPort {
+            text += "\nNot listed? Connect by address: \(connectAddress(port: port))."
+        }
+        return text
+    }
+
+    /// "192.168.1.20 port 51234", or just the port when no LAN address is up.
+    private func connectAddress(port: UInt16) -> String {
+        guard let address = LocalAddress.primaryIPv4() else { return "port \(port)" }
+        return "\(address) port \(port)"
     }
 }
 
@@ -368,7 +556,7 @@ private struct SharedSettingsPane: View {
                         Text("Code")
                         TextField("e.g. 4821", text: $model.pairingCode)
                     }
-                    Text("Encrypts the stream with TLS. Enter the same code on both Macs.")
+                    Text("Encrypts the stream. Enter the same code on both devices.")
                         .font(.caption).foregroundColor(.secondary)
                 }
                 Toggle("Allow direct Wi-Fi (no router)", isOn: $model.hostSettings.allowPeerToPeer)
@@ -442,5 +630,62 @@ private struct CalloutBox<Accessory: View>: View {
         case .success: return .green
         case .warning: return .orange
         }
+    }
+}
+
+// MARK: - Helpers
+
+/// What each screen-size choice means on a given panel, for the picker's hint. Mirrors the
+/// host's geometry rule (spec/PROTOCOL.md §5): crisp is half the panel's pixels in points,
+/// the others scale that by a factor, rounded to even numbers.
+enum ScaleHint {
+    static func title(_ preference: ScalePreference) -> String {
+        switch preference {
+        case .crisp:  return "Crisp"
+        case .larger: return "Larger text"
+        case .more:   return "More space"
+        case .most:   return "Most space"
+        }
+    }
+
+    static func factor(_ preference: ScalePreference) -> Double {
+        switch preference {
+        case .crisp:  return 1.0
+        case .larger: return 0.85
+        case .more:   return 1.15
+        case .most:   return 1.3
+        }
+    }
+
+    static func looksLike(pixelWidth: Int, pixelHeight: Int,
+                          preference: ScalePreference) -> (width: Int, height: Int) {
+        let f = factor(preference)
+        func even(_ value: Double) -> Int { Int((value / 2).rounded()) * 2 }
+        return (even(Double(pixelWidth) / 2 * f), even(Double(pixelHeight) / 2 * f))
+    }
+}
+
+/// This Mac's LAN address, shown so another device can connect by hand when Bonjour is blocked.
+enum LocalAddress {
+    static func primaryIPv4() -> String? {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return nil }
+        defer { freeifaddrs(head) }
+
+        var candidates: [(name: String, address: String)] = []
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let entry = pointer.pointee
+            let flags = Int32(entry.ifa_flags)
+            guard let addr = entry.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET),
+                  flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0 else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count),
+                              nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            let address = String(cString: host)
+            guard !address.hasPrefix("169.254.") else { continue }   // link-local, not routable
+            candidates.append((String(cString: entry.ifa_name), address))
+        }
+        // Wi-Fi / built-in Ethernet first, then anything else (USB tethering and the like).
+        return (candidates.first { $0.name.hasPrefix("en") } ?? candidates.first)?.address
     }
 }

@@ -1,0 +1,136 @@
+{
+  "handshake" : {
+    "audioPacket" : {
+      "headerHex" : "0101000007000000404b4c0000000000",
+      "hostTimeMicros" : "5000000",
+      "pcmHex" : "000102030405060708090a0b0c0d0e0f",
+      "seq" : 7,
+      "wireHex" : "0101000007000000404b4c0000000000ea6483d7392e957521389e711ad84380549e35692323b0288fb70b2621fc7bb4"
+    },
+    "codeSecretHex" : "fa6072ba2a085883f5e3c70773c86905025f96acbd7f1a350e2469bff29bf7fd",
+    "initiatorMessageHex" : "8f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f32cf74c28147886f6d713e1cc0c64978e68cb49cc86fab35575a6fe3e473bf44",
+    "initiatorPrivateHex" : "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "messages" : [
+      {
+        "aadHex" : "0100000017000000e803000000000000",
+        "counter" : 0,
+        "direction" : 0,
+        "plaintextHex" : "7b2261223a317d",
+        "timestampMicros" : "1000",
+        "type" : 1,
+        "wireHex" : "0100000017000000e803000000000000835e0df4a994a9031a2a0477e0049313d9e4946325d86a"
+      },
+      {
+        "aadHex" : "4000000010000000d007000000000000",
+        "counter" : 1,
+        "direction" : 0,
+        "plaintextHex" : "",
+        "timestampMicros" : "2000",
+        "type" : 64,
+        "wireHex" : "4000000010000000d0070000000000007db151708fa46decd75c50b22420bffc"
+      },
+      {
+        "aadHex" : "0200000012000000b80b000000000000",
+        "counter" : 0,
+        "direction" : 1,
+        "plaintextHex" : "6f6b",
+        "timestampMicros" : "3000",
+        "type" : 2,
+        "wireHex" : "0200000012000000b80b000000000000414dcce1fa235c10974684ce69a98cc68c3e"
+      }
+    ],
+    "pairingCode" : "4821",
+    "responderMessageHex" : "605a725d2a4adfeeb1a29e17edd621c1b7593ee8cdbc44ac6c4ab6e2f805d23c03f93d32192a0cc1a65096244db218f1e0ba4a7269a4dab8b10cf1e46feb83e1",
+    "responderPrivateHex" : "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "saltHex" : "605a725d2a4adfeeb1a29e17edd621c1b7593ee8cdbc44ac6c4ab6e2f805d23c8f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f",
+    "sessionKeyHex" : "5383a3b3f91152077891b84cfdb1f56c18b3ec90e6bc38a0f356477f5817539d",
+    "sharedSecretHex" : "00cacd4ec29dce95425b3d0f609586dc065a9d4dbd9ef8334ebdbea87013bd09"
+  },
+  "headers" : [
+    {
+      "flags" : 1,
+      "hex" : "1101000000400100d202964900000000",
+      "name" : "videoFrame keyframe",
+      "payloadLength" : 81920,
+      "timestampMicros" : "1234567890",
+      "type" : 17
+    },
+    {
+      "flags" : 0,
+      "hex" : "32000000000000002a00000000000000",
+      "name" : "frameAck",
+      "payloadLength" : 0,
+      "timestampMicros" : "42",
+      "type" : 50
+    },
+    {
+      "flags" : 0,
+      "hex" : "20000000200000008899aabbccddeeff",
+      "name" : "input",
+      "payloadLength" : 32,
+      "timestampMicros" : "18441921395520346504",
+      "type" : 32
+    }
+  ],
+  "inputEvents" : [
+    {
+      "button" : 0,
+      "clickCount" : 1,
+      "deltaX" : -3.5,
+      "deltaY" : 2,
+      "hex" : "010001000000803e0000403f000060c000000040000000000000000000000000",
+      "isPreciseScroll" : false,
+      "keyCode" : 0,
+      "kind" : 1,
+      "modifiers" : 0,
+      "name" : "mouseMove",
+      "x" : 0.25,
+      "y" : 0.75
+    },
+    {
+      "button" : 1,
+      "clickCount" : 2,
+      "deltaX" : 0,
+      "deltaY" : 0,
+      "hex" : "020102000000003f0000003f0000000000000000000000000000000000000000",
+      "isPreciseScroll" : false,
+      "keyCode" : 0,
+      "kind" : 2,
+      "modifiers" : 0,
+      "name" : "mouseDown right double",
+      "x" : 0.5,
+      "y" : 0.5
+    },
+    {
+      "button" : 0,
+      "clickCount" : 1,
+      "deltaX" : 0,
+      "deltaY" : -12.5,
+      "hex" : "04000101cdcccc3d6666663f00000000000048c1000000000000000000000000",
+      "isPreciseScroll" : true,
+      "keyCode" : 0,
+      "kind" : 4,
+      "modifiers" : 0,
+      "name" : "scroll precise",
+      "x" : 0.10000000149011612,
+      "y" : 0.89999997615814209
+    },
+    {
+      "button" : 0,
+      "clickCount" : 1,
+      "deltaX" : 0,
+      "deltaY" : 0,
+      "hex" : "0500010000000000000000000000000000000000240000000000120000000000",
+      "isPreciseScroll" : false,
+      "keyCode" : 36,
+      "kind" : 5,
+      "modifiers" : 1179648,
+      "name" : "keyDown return cmd+shift",
+      "x" : 0,
+      "y" : 0
+    }
+  ],
+  "json" : {
+    "videoParameterSets" : "{\"codec\":\"hevc\",\"height\":1440,\"nalLengthSize\":4,\"parameterSets\":[\"QAEM\",\"QgE=\",\"RAE=\"],\"width\":2304}"
+  }
+}
