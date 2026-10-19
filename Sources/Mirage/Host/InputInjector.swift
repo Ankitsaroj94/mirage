@@ -11,21 +11,24 @@ import AppKit
 /// Requires Accessibility permission on the host.
 final class InputInjector {
 
-    private var displayBounds: CGRect
+    private let displayID: CGDirectDisplayID
+    /// Looked up per event, not captured once: the display is still being placed when the
+    /// session starts, and the user can drag it anywhere in System Settings › Displays later.
+    private var displayBounds: CGRect { CGDisplayBounds(displayID) }
+    private(set) var eventsHandled = 0
     private let source = CGEventSource(stateID: .hidSystemState)
     private var pressedButtons: Set<UInt8> = []
     private var currentFlags: CGEventFlags = []
     private var lastLocation: CGPoint
 
-    init(displayBounds: CGRect) {
-        self.displayBounds = displayBounds
-        self.lastLocation = CGPoint(x: displayBounds.midX, y: displayBounds.midY)
+    init(displayID: CGDirectDisplayID) {
+        self.displayID = displayID
+        let bounds = CGDisplayBounds(displayID)
+        self.lastLocation = CGPoint(x: bounds.midX, y: bounds.midY)
         // Do not let macOS suppress our synthetic events right after a real local one.
         let permitEverything: CGEventFilterMask = [.permitLocalMouseEvents, .permitLocalKeyboardEvents, .permitSystemDefinedEvents]
         source?.setLocalEventsFilterDuringSuppressionState(permitEverything, state: .eventSuppressionStateSuppressionInterval)
     }
-
-    func updateBounds(_ bounds: CGRect) { displayBounds = bounds }
 
     static var isPermitted: Bool {
         AXIsProcessTrusted()
@@ -37,6 +40,10 @@ final class InputInjector {
     }
 
     func handle(_ event: InputEvent) {
+        eventsHandled += 1
+        if eventsHandled == 1 {
+            Log.app("input: first event from the display (\(event.kind)), bounds \(displayBounds), accessibility \(Self.isPermitted ? "granted" : "NOT granted — macOS drops these")")
+        }
         currentFlags = CGEventFlags(rawValue: UInt64(event.modifiers))
 
         switch event.kind {

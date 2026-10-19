@@ -268,9 +268,12 @@ final class HostSession: ObservableObject {
 
         acceptsRemoteInput = settings.acceptRemoteInput && hello.wantsInputForwarding
         if acceptsRemoteInput {
-            let bounds = display.bounds
-            injectorQueue.sync { self.injector = InputInjector(displayBounds: bounds) }
+            let id = display.displayID
+            injectorQueue.sync { self.injector = InputInjector(displayID: id) }
         }
+        Log.app("input: \(acceptsRemoteInput ? "accepting" : "ignoring") input from the display"
+                + " (setting \(settings.acceptRemoteInput), client wants \(hello.wantsInputForwarding)),"
+                + " accessibility \(InputInjector.isPermitted ? "granted" : "NOT granted")")
 
         guard let link else { reject("The link closed before the stream could start."); return }
         let pump = FramePump(link: link, encoder: encoder, settings: settings)
