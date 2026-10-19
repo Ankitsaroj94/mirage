@@ -32,7 +32,7 @@ swiftc -O $CORE Tests/Harness/main.swift -o "$TMP/linktest" 2>&1 | grep -E "erro
 "$TMP/linktest" --psk --soak;       check $?
 
 step "2/6  protocol v2 + spec/vectors.json"
-swiftc -O $CORE Sources/Mirage/Core/Discovery.swift \
+swiftc -O $CORE Sources/Mirage/Core/Discovery.swift Sources/Mirage/Core/AdbBridge.swift \
           Tests/ProtocolV2Harness/main.swift -o "$TMP/v2test" 2>&1 | grep -E "error:" && FAILED=1
 "$TMP/v2test" spec/vectors.json; check $?
 

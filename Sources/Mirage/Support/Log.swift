@@ -10,3 +10,10 @@ enum Log {
     static func video(_ message: String) { videoLogger.info("\(message, privacy: .public)") }
     static func app(_ message: String)   { appLogger.info("\(message, privacy: .public)") }
 }
+
+/// A user-facing error: the message is shown as is.
+struct MirageError: LocalizedError {
+    let message: String
+    init(_ message: String) { self.message = message }
+    var errorDescription: String? { message }
+}
